@@ -1,0 +1,11 @@
+{
+  "lead_name": "there",
+  "persona": "clinic_booking",
+  "booking": true,
+  "language": "auto",
+  "system_prompt": "Your name is Priya.",
+  "greeting": "This is Priya from Star Smile Dental. Shall we book your check-up?",
+  "max_duration_secs": 150,
+  "voice": "ishita",
+  "tts_model": "bulbul:v3"
+}

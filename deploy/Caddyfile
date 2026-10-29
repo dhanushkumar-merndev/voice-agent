@@ -1,0 +1,11 @@
+# Caddy in front of voice-server on the VPS: automatic HTTPS, WebSockets pass through.
+# Replace the domain, point its DNS at the VPS, then: sudo caddy run --config deploy/Caddyfile
+voice.example.com {
+	# Keep /metrics private (scrape it from localhost instead).
+	@metrics path /metrics
+	respond @metrics 404
+
+	reverse_proxy localhost:8080 {
+		flush_interval -1
+	}
+}

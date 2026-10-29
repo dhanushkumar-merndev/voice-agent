@@ -1,0 +1,16 @@
+# Tamil fixed lines (gender-neutral). Have a native speaker review before production.
+disclosure = "வணக்கம், இது ஒரு AI உதவியாளர் அழைப்பு, இந்த அழைப்பு பதிவு செய்யப்படுகிறது."
+default_greeting = "நான் {name} அவர்களிடம் பேசுகிறேனா?"
+reprompt = "நீங்கள் லைனில் இருக்கிறீர்களா?"
+silence_goodbye = "உங்கள் குரல் கேட்கவில்லை, அதனால் இந்த அழைப்பை முடிக்கிறேன். நன்றி!"
+goodbye = "உங்கள் நேரத்திற்கு நன்றி. வணக்கம்!"
+short_goodbye = "நன்றி, வணக்கம்!"
+one_moment = "ஒரு நிமிடம் காத்திருங்கள்."
+checking = ["ம்ம், ஒரு நிமிஷம், பார்க்கிறேன்.", "ஒரு செகண்ட்.", "சரி, பார்க்கலாம்."]  # used in turn, so the filler doesn't repeat
+apology = "மன்னிக்கவும், இப்போது சிறு சிக்கல் உள்ளது. மீண்டும் சொல்ல முடியுமா?"
+send_on_whatsapp = "அந்த விவரங்களை உங்களுக்கு WhatsApp-இல் அனுப்புகிறேன்."
+budget_closing = "உங்கள் நேரத்திற்கு மிக்க நன்றி. எங்கள் குழு உங்களைத் தொடர்பு கொள்ளும். வணக்கம்!"
+max_duration_closing = "இப்போது அழைப்பை முடிக்க வேண்டும். எங்கள் குழு உங்களைத் தொடர்பு கொள்ளும். நன்றி, வணக்கம்!"
+
+# Common reply openers, cached as audio so replies starting with one play instantly.
+phrases = ["சரி.", "புரிகிறது.", "நன்றி.", "ஆமாம்.", "நல்லது.", "கண்டிப்பாக.", "வணக்கம்."]

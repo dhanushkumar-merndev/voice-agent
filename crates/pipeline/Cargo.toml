@@ -1,0 +1,31 @@
+[package]
+name = "pipeline"
+description = "Per-call real-time actor: VAD, turn-taking, barge-in, guardrails, tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+audio.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+common.workspace = true
+metrics.workspace = true
+ort.workspace = true
+providers.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true

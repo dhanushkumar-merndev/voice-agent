@@ -1,0 +1,16 @@
+# Hindi fixed lines. Phrased gender-neutrally so they fit male and female voices.
+disclosure = "नमस्ते, यह एक AI सहायक की कॉल है, और यह कॉल रिकॉर्ड की जा रही है।"
+default_greeting = "क्या मेरी बात {name} जी से हो रही है?"
+reprompt = "क्या आप लाइन पर हैं?"
+silence_goodbye = "आपकी आवाज़ नहीं आ रही है, इसलिए यह कॉल अभी समाप्त की जा रही है। धन्यवाद!"
+goodbye = "आपके समय के लिए धन्यवाद। नमस्ते!"
+short_goodbye = "धन्यवाद, नमस्ते!"
+one_moment = "एक पल रुकिए।"
+checking = ["हम्म, एक पल रुकिए, चेक कर रहे हैं।", "एक सेकंड।", "ज़रा देखते हैं।", "अभी देखते हैं।"]  # used in turn, so the filler doesn't repeat
+apology = "माफ़ कीजिए, अभी थोड़ी दिक्कत है। क्या आप दोबारा बोल सकते हैं?"
+send_on_whatsapp = "यह जानकारी आपको WhatsApp पर भेज दी जाएगी।"
+budget_closing = "आपके समय के लिए बहुत धन्यवाद। हमारी टीम आपसे जल्द संपर्क करेगी। नमस्ते!"
+max_duration_closing = "अब कॉल समाप्त करने का समय है। हमारी टीम आपसे जल्द संपर्क करेगी। धन्यवाद, नमस्ते!"
+
+# Common reply openers, cached as audio so replies starting with one play instantly.
+phrases = ["जी।", "ठीक है।", "बिल्कुल।", "अच्छा।", "धन्यवाद।", "जी हाँ।", "बहुत बढ़िया।", "नमस्ते।", "बहुत अच्छा सवाल है।"]

@@ -1,0 +1,10 @@
+{
+  "lead_name": "there",
+  "persona": "clinic_booking",
+  "booking": true,
+  "language": "hi-IN",
+  "system_prompt": "",
+  "greeting": "मैं स्टार स्माइल डेंटल क्लिनिक से बोल रही हूँ। क्या आपका चेक-अप बुक कर दें?",
+  "max_duration_secs": 150,
+  "voice": "ritu_hi_conversation"
+}

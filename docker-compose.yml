@@ -1,0 +1,62 @@
+# Local:  `docker compose up -d` starts Postgres + MinIO; run the server with `cargo run`.
+# VPS:    set COMPOSE_PROFILES=app in .env and the same `docker compose up -d`
+#         also builds and starts voice-server (Caddy in front for HTTPS).
+name: voice-backend
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg16
+    environment:
+      POSTGRES_USER: voice
+      POSTGRES_PASSWORD: voice
+      POSTGRES_DB: voice
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voice -d voice"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # MinIO no longer publishes community images; pgsty/minio is a community
+  # build of the same server (same env vars, same S3 API).
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minio}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minio123}
+      MINIO_SITE_REGION: ${S3_REGION:-ap-south-1}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - miniodata:/data
+    restart: unless-stopped
+
+  voice-server:
+    profiles: ["app"]
+    build: .
+    env_file: .env
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+    # Host networking: no Docker NAT hop on the media WebSocket path, and
+    # localhost URLs in .env work unchanged inside the container.
+    network_mode: host
+    volumes:
+      - ./models:/app/models:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    # Let active calls finish on `docker compose down` (SHUTDOWN_GRACE_SECS + margin).
+    stop_grace_period: 130s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:

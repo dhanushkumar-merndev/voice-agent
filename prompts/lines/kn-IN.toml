@@ -1,0 +1,16 @@
+# Kannada fixed lines (gender-neutral). Have a native speaker review before production.
+disclosure = "ನಮಸ್ಕಾರ, ಇದು ಒಂದು AI ಸಹಾಯಕರ ಕರೆ, ಮತ್ತು ಈ ಕರೆಯನ್ನು ರೆಕಾರ್ಡ್ ಮಾಡಲಾಗುತ್ತಿದೆ."
+default_greeting = "ನಾನು {name} ಅವರೊಂದಿಗೆ ಮಾತನಾಡುತ್ತಿದ್ದೇನೆಯೇ?"
+reprompt = "ನೀವು ಲೈನ್‌ನಲ್ಲಿ ಇದ್ದೀರಾ?"
+silence_goodbye = "ನಿಮ್ಮ ಧ್ವನಿ ಕೇಳಿಸುತ್ತಿಲ್ಲ, ಆದ್ದರಿಂದ ಈ ಕರೆಯನ್ನು ಮುಗಿಸುತ್ತಿದ್ದೇನೆ. ಧನ್ಯವಾದಗಳು!"
+goodbye = "ನಿಮ್ಮ ಸಮಯಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ನಮಸ್ಕಾರ!"
+short_goodbye = "ಧನ್ಯವಾದಗಳು, ನಮಸ್ಕಾರ!"
+one_moment = "ಒಂದು ಕ್ಷಣ ಕಾಯಿರಿ."
+checking = ["ಹ್ಮ್, ಒಂದು ನಿಮಿಷ, ನೋಡ್ತೀನಿ.", "ಒಂದು ಸೆಕೆಂಡ್.", "ಸರಿ, ನೋಡೋಣ."]  # used in turn, so the filler doesn't repeat
+apology = "ಕ್ಷಮಿಸಿ, ಈಗ ಸ್ವಲ್ಪ ತೊಂದರೆ ಇದೆ. ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ಹೇಳುತ್ತೀರಾ?"
+send_on_whatsapp = "ಆ ವಿವರಗಳನ್ನು ನಿಮಗೆ WhatsApp ನಲ್ಲಿ ಕಳುಹಿಸುತ್ತೇನೆ."
+budget_closing = "ನಿಮ್ಮ ಸಮಯಕ್ಕೆ ತುಂಬಾ ಧನ್ಯವಾದಗಳು. ನಮ್ಮ ತಂಡ ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತದೆ. ನಮಸ್ಕಾರ!"
+max_duration_closing = "ಈಗ ಕರೆ ಮುಗಿಸಬೇಕಾಗಿದೆ. ನಮ್ಮ ತಂಡ ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತದೆ. ಧನ್ಯವಾದಗಳು, ನಮಸ್ಕಾರ!"
+
+# Common reply openers, cached as audio so replies starting with one play instantly.
+phrases = ["ಸರಿ.", "ಅರ್ಥವಾಯಿತು.", "ಧನ್ಯವಾದಗಳು.", "ಹೌದು.", "ಒಳ್ಳೆಯದು.", "ಖಂಡಿತ.", "ನಮಸ್ಕಾರ."]

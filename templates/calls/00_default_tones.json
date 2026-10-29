@@ -1,0 +1,9 @@
+{
+  "lead_name": "there",
+  "persona": "clinic_booking",
+  "booking": true,
+  "language": "auto",
+  "system_prompt": "",
+  "greeting": "I'm calling from Star Smile Dental about your check-up. Which day suits you?",
+  "max_duration_secs": 150
+}

@@ -1,0 +1,10 @@
+{
+  "lead_name": "there",
+  "persona": "clinic_booking",
+  "booking": true,
+  "language": "auto",
+  "system_prompt": "Your name is Arjun.",
+  "greeting": "This is Arjun from Star Smile Dental. Shall we book your check-up?",
+  "max_duration_secs": 150,
+  "voice": "deven_en_conversation"
+}

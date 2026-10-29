@@ -1,0 +1,16 @@
+# Malayalam fixed lines (gender-neutral). Have a native speaker review before production.
+disclosure = "നമസ്കാരം, ഇത് ഒരു AI അസിസ്റ്റന്റിന്റെ കോളാണ്, ഈ കോൾ റെക്കോർഡ് ചെയ്യുന്നുണ്ട്."
+default_greeting = "ഞാൻ {name}-നോടാണോ സംസാരിക്കുന്നത്?"
+reprompt = "നിങ്ങൾ ലൈനിൽ ഉണ്ടോ?"
+silence_goodbye = "നിങ്ങളുടെ ശബ്ദം കേൾക്കുന്നില്ല, അതിനാൽ ഈ കോൾ അവസാനിപ്പിക്കുന്നു. നന്ദി!"
+goodbye = "നിങ്ങളുടെ സമയത്തിന് നന്ദി. നമസ്കാരം!"
+short_goodbye = "നന്ദി, നമസ്കാരം!"
+one_moment = "ഒരു നിമിഷം കാത്തിരിക്കൂ."
+checking = ["ഹ്മ്, ഒരു നിമിഷം, നോക്കട്ടെ.", "ഒരു സെക്കന്റ്.", "ശരി, നോക്കാം."]  # used in turn, so the filler doesn't repeat
+apology = "ക്ഷമിക്കണം, ഇപ്പോൾ ചെറിയ ഒരു പ്രശ്നമുണ്ട്. ഒന്നുകൂടി പറയാമോ?"
+send_on_whatsapp = "ആ വിവരങ്ങൾ നിങ്ങൾക്ക് WhatsApp-ൽ അയച്ചുതരാം."
+budget_closing = "നിങ്ങളുടെ സമയത്തിന് വളരെ നന്ദി. ഞങ്ങളുടെ ടീം നിങ്ങളെ ബന്ധപ്പെടും. നമസ്കാരം!"
+max_duration_closing = "ഇപ്പോൾ കോൾ അവസാനിപ്പിക്കണം. ഞങ്ങളുടെ ടീം നിങ്ങളെ ബന്ധപ്പെടും. നന്ദി, നമസ്കാരം!"
+
+# Common reply openers, cached as audio so replies starting with one play instantly.
+phrases = ["ശരി.", "മനസ്സിലായി.", "നന്ദി.", "അതെ.", "നല്ലത്.", "തീർച്ചയായും.", "നമസ്കാരം."]

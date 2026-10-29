@@ -1,0 +1,10 @@
+{
+  "lead_name": "there",
+  "persona": "clinic_booking",
+  "booking": true,
+  "language": "kn-IN",
+  "system_prompt": "",
+  "greeting": "ಸ್ಟಾರ್ ಸ್ಮೈಲ್ ಡೆಂಟಲ್ ಕ್ಲಿನಿಕ್‌ನಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇನೆ. ನಿಮ್ಮ ಚೆಕ್-ಅಪ್ ಬುಕ್ ಮಾಡೋಣವೇ?",
+  "max_duration_secs": 150,
+  "voice": "chaitra_kn_conversation"
+}

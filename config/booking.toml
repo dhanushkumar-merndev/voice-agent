@@ -1,0 +1,8 @@
+# Appointment slots offered by check_availability / book_appointment.
+timezone = "Asia/Kolkata"
+open = "10:00"            # first slot
+close = "18:00"           # no slot starts at or after this
+slot_mins = 30
+days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+max_days_ahead = 30
+min_notice_mins = 60      # today's slots closer than this are not offered

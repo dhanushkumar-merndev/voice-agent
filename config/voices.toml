@@ -1,0 +1,63 @@
+# Language -> TTS voice. `model` overrides SARVAM_TTS_MODEL for that language.
+# Persona IDs (bulbul:v4-flash) have the form name_lang_style; v3 uses short names.
+# Audition voices before production: https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices
+# A per-call `voice` field replaces the speaker but keeps the language's model.
+#
+# Tones: the LLM tags each reply neutral, happy or serious. `speaker` is the
+# neutral voice (every call starts with it). `tones.happy` / `tones.serious`
+# may name another speaker of the same model and a pace; a tone left out
+# keeps the speaker and only changes the pace (happy 1.05x, serious 0.95x).
+# A per-call `voice` other than the language's own speaker keeps that speaker.
+
+fallback_language = "en-IN"
+
+# Picked by ear on 2026-10-29 from test/output/tts (scripts/tts_samples.py).
+# None of these speakers has a happy/serious style we auditioned, so tones
+# only change the pace.
+# `name`: the agent's name while a voice that doesn't fit the persona's
+# name speaks (male voices; personas are named Priya). `intro` is played
+# once, in that language, the moment the call switches to the voice; the
+# model is then told its new name.
+[languages."en-IN"]
+speaker = "zarina_en_conversation"
+
+[languages."hi-IN"]
+speaker = "aparna_hi_customer"
+
+[languages."ta-IN"]
+speaker = "gokul_ta_narration"
+name = "Gokul"
+intro = "நான் கோகுல், இனி நான் உங்களுடன் பேசுகிறேன்."
+
+[languages."te-IN"]
+speaker = "pooja_te_conversation"
+
+[languages."kn-IN"]
+speaker = "chetan_kn_conversation"
+name = "Chetan"
+intro = "ನಾನು ಚೇತನ್, ಇನ್ನು ಮುಂದೆ ನಾನು ನಿಮ್ಮ ಜೊತೆ ಮಾತಾಡ್ತೀನಿ."
+
+[languages."mr-IN"]
+speaker = "ishita_mr_conversational"
+
+[languages."bn-IN"]
+speaker = "roopa_bn_conversational"
+
+[languages."gu-IN"]
+speaker = "pooja_gu_customer"
+
+[languages."pa-IN"]
+speaker = "anand_pa_customer"
+name = "Anand"
+intro = "ਮੈਂ ਆਨੰਦ ਹਾਂ, ਹੁਣ ਮੈਂ ਤੁਹਾਡੇ ਨਾਲ ਗੱਲ ਕਰਾਂਗਾ।"
+
+# v4 Flash has no Malayalam or Odia personas yet: use bulbul:v3 (₹3 vs ₹1 per 1k chars).
+[languages."ml-IN"]
+model = "bulbul:v3"
+speaker = "vijay"
+name = "Vijay"
+intro = "ഞാൻ വിജയ് ആണ്, ഇനി ഞാൻ നിങ്ങളോട് സംസാരിക്കാം."
+
+[languages."od-IN"]
+model = "bulbul:v3"
+speaker = "pooja"
