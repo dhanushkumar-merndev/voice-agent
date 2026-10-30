@@ -10,9 +10,9 @@ Ultra-low-latency AI voice calling backend in Rust.
 ## Quick start (local)
 
 ```sh
-cp .env.example .env              # boots without keys; fill them in as you get them
+cp ../.env.example ../.env        # one env for both apps; boots without keys
 ./scripts/download_models.sh      # Silero VAD + bge-m3 (~590 MB) into models/
-docker compose up -d              # Postgres 16 + pgvector, MinIO (pgsty/minio build)
+docker compose --env-file ../.env up -d   # Postgres 16 + pgvector, MinIO (pgsty/minio build)
 cargo run --release --bin voice-server
 ```
 
@@ -26,7 +26,7 @@ curl -s -H 'X-API-Key: change-me' localhost:8080/v1/ping
 
 ### Try the full pipeline with no API keys
 
-Set `PROVIDER_MODE=fake` in `.env`. This uses scripted STT, LLM and TTS with real VAD and playout. Then run:
+Set `PROVIDER_MODE=fake` in the root `.env`. This uses scripted STT, LLM and TTS with real VAD and playout. Then run:
 
 ```sh
 cargo run --release --bin voice-sim -- --api-key change-me --wav turn1.wav --wav turn2.wav
@@ -118,7 +118,7 @@ Errors are returned as `{"error": {"code": "...", "message": "..."}}`. The `code
 
 ## Configuration
 
-Everything comes from environment variables; see `.env.example`. Static assets:
+Everything comes from environment variables; see the root `.env.example` (shared with the dashboard). Static assets:
 
 | Path | Contents |
 | --- | --- |
@@ -163,11 +163,11 @@ CPU than the fakes), so leave ~30 % headroom.
 
 ## Deploy to the VPS (India region)
 
-1. Copy the repo and a production `.env`:
+1. Copy the repo and a production root `.env`:
    - set `APP_ENV=production` and `COMPOSE_PROFILES=app`
    - set new `PUBLIC_BASE_URL` (https), `DATABASE_URL` and `S3_*` values (Tigris or AWS S3)
    - set an `API_KEY` of at least 16 characters
-2. Run `./scripts/download_models.sh`, then `docker compose up -d --build`.
+2. Run `./scripts/download_models.sh`, then `docker compose --env-file ../.env up -d --build`.
 3. Put Caddy in front with `deploy/Caddyfile` (automatic HTTPS; WebSockets pass through).
 
 Monitoring: import `deploy/grafana/voice-backend.json` into Grafana. Prometheus scrapes `localhost:8080/metrics`; see `deploy/prometheus.yml`.

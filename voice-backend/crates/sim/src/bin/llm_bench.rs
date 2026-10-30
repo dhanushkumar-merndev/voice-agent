@@ -8,7 +8,7 @@
 //! times, the checks each scenario expects (tool calls, English tool
 //! arguments, language switches, tone tags, reply length) and the ₹ cost.
 //!
-//! Run from `voice-backend/` with the real `.env` (it calls Sarvam):
+//! Run from `voice-backend/` with the real root `../.env` (it calls Sarvam):
 //! `cargo run --release -p sim --bin llm-bench -- --runs 2`
 
 use std::{

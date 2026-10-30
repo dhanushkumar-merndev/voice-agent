@@ -12,12 +12,12 @@ The browser only talks to this app. Route handlers under `/api/v1/*` forward to 
 ## Run
 
 ```bash
-cp .env.example .env.local     # set DASHBOARD_PASSWORD and SESSION_SECRET
+cp ../.env.example ../.env      # once, if missing; set DASHBOARD_PASSWORD and SESSION_SECRET
 pnpm install
 pnpm build && pnpm start -p 3100        # or: pnpm dev
 ```
 
-The voice backend must be running (`VOICE_API_URL`, default `http://127.0.0.1:8080`). The API key comes from `VOICE_API_KEY`, or from `API_KEY` in the file named by `VOICE_BACKEND_ENV`. In development, `../voice-backend/.env` is used by default.
+The voice backend must be running (`VOICE_API_URL`, default `http://127.0.0.1:8080`). Both apps share the root `../.env` (loaded in `next.config.ts`); the API key is the backend's `API_KEY`, or `VOICE_API_KEY` to override it.
 
 ## Test
 

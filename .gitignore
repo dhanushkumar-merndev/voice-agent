@@ -1,2 +1,7 @@
 # Local KB source material (not for the repo)
 /knowledge/
+
+# The one env file for both apps (see .env.example)
+.env
+.env.*
+!.env.example

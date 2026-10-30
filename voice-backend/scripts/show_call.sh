@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Prints a readable summary of one call: transcript, extracted lead fields,
 # follow-ups, latency, usage and cost, and saves the recording to recordings/.
-# Usage: ./scripts/show_call.sh <call_id>   (reads API_KEY and BIND_ADDR from .env)
+# Usage: ./scripts/show_call.sh <call_id>   (reads API_KEY and BIND_ADDR from ../.env)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 id="${1:?usage: $0 <call_id>}"
-key="$(grep '^API_KEY=' .env | cut -d= -f2-)"
-port="$(grep '^BIND_ADDR=' .env | sed -E 's/.*:([0-9]+)$/\1/')"
+key="$(grep '^API_KEY=' ../.env | cut -d= -f2-)"
+port="$(grep '^BIND_ADDR=' ../.env | sed -E 's/.*:([0-9]+)$/\1/')"
 
 json="$(curl -sf "http://localhost:${port:-8080}/v1/calls/${id}" -H "X-API-Key: ${key}")"
 jq -r <<<"$json" '

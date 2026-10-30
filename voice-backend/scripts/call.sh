@@ -4,7 +4,7 @@
 # Usage: ./scripts/call.sh <template> <phone>    e.g. ./scripts/call.sh 10 9036215854
 #        ./scripts/call.sh list
 # <template> is a file name, or just its number prefix ("10" -> 10_v4_...).
-# A 10-digit phone gets +91 in front.  (reads API_KEY and BIND_ADDR from .env)
+# A 10-digit phone gets +91 in front.  (reads API_KEY and BIND_ADDR from ../.env)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -37,8 +37,8 @@ to="$(tr -d ' -' <<<"$2")"
 [[ "$to" =~ ^[0-9]{10}$ ]] && to="+91$to"
 [[ "$to" =~ ^91[0-9]{10}$ ]] && to="+$to"
 
-key="$(grep '^API_KEY=' .env | cut -d= -f2-)"
-port="$(grep '^BIND_ADDR=' .env | sed -E 's/.*:([0-9]+)$/\1/')"
+key="$(grep '^API_KEY=' ../.env | cut -d= -f2-)"
+port="$(grep '^BIND_ADDR=' ../.env | sed -E 's/.*:([0-9]+)$/\1/')"
 base="http://localhost:${port:-8080}"
 
 body="$(jq --arg to "$to" '. + {to: $to}' "$tpl")"

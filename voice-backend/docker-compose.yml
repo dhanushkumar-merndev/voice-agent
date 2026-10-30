@@ -1,5 +1,5 @@
-# Local:  `docker compose up -d` starts Postgres + MinIO; run the server with `cargo run`.
-# VPS:    set COMPOSE_PROFILES=app in .env and the same `docker compose up -d`
+# Local:  `docker compose --env-file ../.env up -d` starts Postgres + MinIO; run the server with `cargo run`.
+# VPS:    set COMPOSE_PROFILES=app in ../.env and the same command
 #         also builds and starts voice-server (Caddy in front for HTTPS).
 name: voice-backend
 
@@ -40,7 +40,7 @@ services:
   voice-server:
     profiles: ["app"]
     build: .
-    env_file: .env
+    env_file: ../.env
     environment:
       BIND_ADDR: 0.0.0.0:8080
     # Host networking: no Docker NAT hop on the media WebSocket path, and

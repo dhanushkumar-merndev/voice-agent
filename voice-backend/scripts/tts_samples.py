@@ -9,7 +9,7 @@ question, like a real reply). Output, per language:
   test/output/tts/index.csv                           voice, gender, model, ₹/min
 
 Run from voice-backend/ with the Sarvam key loaded:
-  set -a; . ./.env; set +a; python3 scripts/tts_samples.py
+  set -a; . ../.env; set +a; python3 scripts/tts_samples.py
 Only the Python standard library is used.
 """
 
@@ -109,7 +109,7 @@ def frames(wav_bytes):
 def main():
     key = os.environ.get("SARVAM_API_KEY")
     if not key:
-        sys.exit("SARVAM_API_KEY is not set (run: set -a; . ./.env; set +a)")
+        sys.exit("SARVAM_API_KEY is not set (run: set -a; . ../.env; set +a)")
     os.makedirs(OUT, exist_ok=True)
     rows, cost, failed = [], 0.0, []
     for folder, lang, line, voices in VOICES:

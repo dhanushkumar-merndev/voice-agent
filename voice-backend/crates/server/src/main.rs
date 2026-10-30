@@ -17,7 +17,8 @@ const DB_STARTUP_WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // A missing .env is fine: production passes real environment variables.
+    // Finds the shared ../.env (dotenvy searches parent folders). A missing
+    // file is fine: production passes real environment variables.
     let _ = dotenvy::dotenv();
     // Several crates pull in rustls; pick one crypto provider for the process.
     let _ = rustls::crypto::ring::default_provider().install_default();

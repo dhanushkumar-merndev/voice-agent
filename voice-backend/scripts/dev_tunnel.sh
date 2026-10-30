@@ -36,5 +36,5 @@ fi
 echo
 echo "  PUBLIC_BASE_URL=$url"
 echo
-echo "Put this in .env and restart voice-server. Ctrl-C stops the tunnel."
+echo "Put this in ../.env (repo root) and restart voice-server. Ctrl-C stops the tunnel."
 wait "$pid"

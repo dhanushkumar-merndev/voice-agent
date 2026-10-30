@@ -4,8 +4,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-key="$(grep '^API_KEY=' .env | cut -d= -f2-)"
-port="$(grep '^BIND_ADDR=' .env | sed -E 's/.*:([0-9]+)$/\1/')"
+key="$(grep '^API_KEY=' ../.env | cut -d= -f2-)"
+port="$(grep '^BIND_ADDR=' ../.env | sed -E 's/.*:([0-9]+)$/\1/')"
 query=""
 [[ $# -gt 0 ]] && query="?month=$1"
 

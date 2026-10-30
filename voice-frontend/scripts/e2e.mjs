@@ -5,7 +5,7 @@
 // recordings. Leaves no data behind.
 //
 //   node scripts/e2e.mjs [http://127.0.0.1:3100]
-// Reads DASHBOARD_PASSWORD from the environment or .env.local.
+// Reads DASHBOARD_PASSWORD from the environment or the root ../.env.
 
 import { readFileSync } from "node:fs";
 
@@ -14,7 +14,7 @@ const BASE = (process.argv[2] ?? "http://127.0.0.1:3100").replace(/\/$/, "");
 function envLocal(name) {
   if (process.env[name]) return process.env[name];
   try {
-    const line = readFileSync(new URL("../.env.local", import.meta.url), "utf8")
+    const line = readFileSync(new URL("../../.env", import.meta.url), "utf8")
       .split("\n")
       .find((l) => l.startsWith(`${name}=`));
     return line?.slice(name.length + 1).trim();
