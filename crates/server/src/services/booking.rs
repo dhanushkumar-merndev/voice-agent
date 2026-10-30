@@ -94,22 +94,7 @@ impl Booking {
     /// can turn "tomorrow" or "Monday" into a `YYYY-MM-DD` without
     /// calculating.
     pub fn calendar_line(&self, now: DateTime<Utc>) -> String {
-        let today = self.today(now);
-        let mut s = format!("{} {}", today.weekday_name(), today);
-        s.push_str(". Next days: ");
-        let next: Vec<String> = (1..=7)
-            .filter_map(|i| today.checked_add_signed(Duration::days(i)))
-            .map(|d| {
-                let label = if d == today.succ_opt().unwrap_or(d) {
-                    " (tomorrow)"
-                } else {
-                    ""
-                };
-                format!("{} {}{label}", d.weekday_name(), d)
-            })
-            .collect();
-        s.push_str(&next.join(", "));
-        s
+        date_line(self.today(now), 7)
     }
 
     /// All slot start times on an open day.
@@ -365,6 +350,28 @@ impl Booking {
     }
 }
 
+/// Prompt line naming `today` and the following `days` dates with their
+/// weekdays, e.g. "Thursday 2026-10-29. Next days: Friday 2026-10-30
+/// (tomorrow), ...". The model looks dates up here instead of calculating.
+pub fn date_line(today: NaiveDate, days: i64) -> String {
+    let next: Vec<String> = (1..=days)
+        .filter_map(|i| today.checked_add_signed(Duration::days(i)))
+        .map(|d| {
+            let label = if Some(d) == today.succ_opt() {
+                " (tomorrow)"
+            } else {
+                ""
+            };
+            format!("{} {d}{label}", d.weekday_name())
+        })
+        .collect();
+    format!(
+        "{} {today}. Next days: {}",
+        today.weekday_name(),
+        next.join(", ")
+    )
+}
+
 trait WeekdayName {
     fn weekday_name(&self) -> &'static str;
 }
@@ -516,6 +523,16 @@ mod tests {
         assert!(line.starts_with("Wednesday 2026-10-28"));
         assert!(line.contains("Thursday 2026-10-29 (tomorrow)"));
         assert!(line.contains("Wednesday 2026-11-04"));
+        assert!(!line.contains("2026-11-05"));
+    }
+
+    #[test]
+    fn date_line_covers_two_weeks() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        let line = date_line(today, 14);
+        assert!(line.starts_with("Thursday 2026-10-29. Next days: Friday 2026-10-30 (tomorrow)"));
+        assert!(line.contains("Saturday 2026-11-07"));
+        assert!(line.ends_with("Thursday 2026-11-12"));
     }
 
     #[test]

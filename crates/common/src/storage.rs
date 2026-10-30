@@ -124,6 +124,18 @@ impl Storage {
         Ok(data.into_bytes().to_vec())
     }
 
+    /// Deletes an object (a missing object is not an error).
+    pub async fn delete(&self, key: &str) -> Result<(), AppError> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| AppError::Storage(DisplayErrorContext(&e).to_string()))
+    }
+
     /// A short-lived signed GET URL.
     pub async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, AppError> {
         let config =

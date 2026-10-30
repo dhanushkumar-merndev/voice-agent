@@ -1,6 +1,6 @@
 # Malayalam fixed lines (gender-neutral). Have a native speaker review before production.
-disclosure = "നമസ്കാരം, ഇത് ഒരു AI അസിസ്റ്റന്റിന്റെ കോളാണ്, ഈ കോൾ റെക്കോർഡ് ചെയ്യുന്നുണ്ട്."
-default_greeting = "ഞാൻ {name}-നോടാണോ സംസാരിക്കുന്നത്?"
+disclosure = "ഇത് ഒരു AI അസിസ്റ്റന്റ് ആണ്, ഈ കോൾ റെക്കോർഡ് ചെയ്യുന്നുണ്ട്."
+default_greeting = "നമസ്കാരം, ഞാൻ {name}-നോടാണോ സംസാരിക്കുന്നത്?"
 reprompt = "നിങ്ങൾ ലൈനിൽ ഉണ്ടോ?"
 silence_goodbye = "നിങ്ങളുടെ ശബ്ദം കേൾക്കുന്നില്ല, അതിനാൽ ഈ കോൾ അവസാനിപ്പിക്കുന്നു. നന്ദി!"
 goodbye = "നിങ്ങളുടെ സമയത്തിന് നന്ദി. നമസ്കാരം!"

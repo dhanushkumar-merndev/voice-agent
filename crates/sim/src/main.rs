@@ -49,6 +49,10 @@ struct Args {
     /// Knowledge base ID.
     #[arg(long)]
     knowledge_base_id: Option<String>,
+    /// Agent ID (`/v1/agents`); its prompt is used and `--system-prompt`
+    /// becomes extra instructions only when given explicitly.
+    #[arg(long)]
+    agent_id: Option<String>,
     /// Where to save the agent's audio.
     #[arg(long, default_value = "sim-out/agent.wav")]
     out: PathBuf,
@@ -88,6 +92,10 @@ async fn main() -> anyhow::Result<()> {
         "system_prompt": args.system_prompt,
         "language": args.language,
     });
+    if let Some(agent) = &args.agent_id {
+        body["agent_id"] = json!(agent);
+        body["system_prompt"] = json!("");
+    }
     if let Some(kb) = &args.knowledge_base_id {
         body["knowledge_base_id"] = json!(kb);
     }

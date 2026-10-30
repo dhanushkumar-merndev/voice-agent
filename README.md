@@ -70,11 +70,18 @@ curl -s -X POST localhost:8080/v1/knowledge-bases/<kb_id>/search -H 'X-API-Key: 
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/v1/calls` | Place a call. Rate limited; supports `Idempotency-Key`. |
-| GET | `/v1/calls/{id}` | Status, transcript, extracted fields, follow-ups, recording URL (signed, 5 min), latency p50/p95 per stage, usage and cost (₹). |
+| POST | `/v1/calls` | Place a call (`agent_id`, or `persona`/`system_prompt`; request fields override the agent's). Rate limited; supports `Idempotency-Key`. |
+| GET | `/v1/calls?limit=&offset=&status=&agent_id=` | Newest calls first, numbers masked to the last 4 digits, with cost, interest and response time. |
+| GET | `/v1/calls/{id}` | Status, transcript, extracted fields (agent fields under `custom`), follow-ups, recording URL (signed, 5 min), latency p50/p95 per stage, usage and cost (₹). |
 | POST | `/v1/calls/{id}/hangup` | End the call. |
-| POST | `/v1/knowledge-bases` | Create a knowledge base. |
+| GET | `/v1/stats?days=30` | Dashboard: totals, cost by service, per-day series (India dates), outcomes, languages, interest, per-agent table, latency percentiles. |
+| GET | `/v1/options` | Personas, languages and voices, models, limits and whether calling is allowed right now. |
+| GET, POST | `/v1/agents` | List or create agents: a prompt, typed fields to collect (`text`, `number`, `date`, `boolean`, `choice`), a knowledge base and call defaults. |
+| GET, PUT, DELETE | `/v1/agents/{id}` | Read, replace or delete an agent. Past calls keep the fields they used. |
+| GET, POST | `/v1/knowledge-bases` | List (with document and chunk counts) or create knowledge bases. |
+| DELETE | `/v1/knowledge-bases/{id}` | Delete with its documents, chunks and stored files. |
 | POST, GET | `/v1/knowledge-bases/{id}/documents` | Upload (`.txt`, `.md`, `.pdf`; processed in the background) or list documents. |
+| DELETE | `/v1/knowledge-bases/{id}/documents/{doc}` | Delete one document and its chunks. |
 | POST | `/v1/knowledge-bases/{id}/search` | Debug search. |
 | POST | `/v1/dev/sim-calls` | `APP_ENV=local` only: a call without Plivo, for `voice-sim`. |
 | POST | `/plivo/{answer,ring,hangup,recording,stream-status}/{id}` | Plivo webhooks. `X-Plivo-Signature-V3` is checked; unsigned requests are rejected. |

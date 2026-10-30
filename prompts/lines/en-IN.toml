@@ -1,17 +1,17 @@
 # Fixed lines spoken outside the LLM. Each is synthesized once per voice and cached.
 # The file name is the BCP-47 language code. en-IN is required and is the fallback.
-disclosure = "Hi, I'm an AI assistant, and this call is recorded."
-default_greeting = "Am I speaking with {name}?"
+disclosure = "This is an AI assistant, and this call is recorded."
+default_greeting = "Hi, am I speaking with {name}?"
 reprompt = "Are you still there?"
 silence_goodbye = "I can't hear you, so I'll end the call now. Thank you, goodbye!"
 goodbye = "Thank you for your time. Goodbye!"
 short_goodbye = "Thanks, bye!"
 one_moment = "One moment please."
-checking = ["Hmm, one moment, let me check.", "Let me see.", "Okay, checking.", "One sec."]  # used in turn, so the filler doesn't repeat
+checking = ["One moment, let me check.", "Let me check that.", "Just a moment.", "Let me see."]  # used in turn, so the filler doesn't repeat
 apology = "Sorry, I'm having trouble right now. Could you say that again?"
 send_on_whatsapp = "I'll send that to you on WhatsApp."
 budget_closing = "Thank you so much for your time. Our team will follow up with you. Goodbye!"
 max_duration_closing = "I need to wrap up now. Our team will follow up with you. Thank you, goodbye!"
 
 # Common reply openers, cached as audio so replies starting with one play instantly.
-phrases = ["Got it.", "Ohh okay.", "Oh okay.", "Mm-hm.", "Ah, I see.", "I see.", "Sure thing.", "Sure.", "Okay.", "Right.", "Yeah.", "No worries.", "Hmm...", "Umm...", "Perfect.", "Of course.", "Thank you.", "Hello.", "That makes sense.", "Thanks for sharing that."]
+phrases = ["Understood.", "I see.", "Certainly.", "Got it.", "Sure.", "Okay.", "Right.", "Of course.", "No problem.", "Thank you.", "Hello.", "That makes sense.", "Thanks for sharing that."]

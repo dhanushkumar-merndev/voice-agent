@@ -30,6 +30,9 @@ pub enum PlayoutCmd {
     Audio(u64, Bytes),
     /// No more audio for clause `id`.
     End(u64),
+    /// A complete clip played ahead of every clause that has not started
+    /// yet (a filler while a slow reply is still coming).
+    Jump(u64, Bytes),
     /// Drop everything (barge-in) and report what was played.
     Clear(oneshot::Sender<Vec<PlayedClause>>),
 }
@@ -95,6 +98,11 @@ impl Playout {
         self.send(PlayoutCmd::Register(id)).await;
         self.send(PlayoutCmd::Audio(id, audio)).await;
         self.send(PlayoutCmd::End(id)).await;
+    }
+
+    /// Plays a complete clip before any clause that has not started.
+    pub async fn jump_clip(&self, id: u64, audio: Bytes) {
+        self.send(PlayoutCmd::Jump(id, audio)).await;
     }
 
     /// Clears playback and returns what was heard of each clause.
@@ -247,6 +255,22 @@ async fn run(
                     slot.ended = true;
                 }
             }
+            PlayoutCmd::Jump(id, data) => {
+                let at = slots
+                    .iter()
+                    .position(|s| s.sent == 0)
+                    .unwrap_or(slots.len());
+                slots.insert(
+                    at,
+                    Slot {
+                        id,
+                        audio: BytesMut::from(&data[..]),
+                        ended: true,
+                        sent: 0,
+                        start_ms: None,
+                    },
+                );
+            }
             PlayoutCmd::Clear(reply) => {
                 let elapsed =
                     clock_start.map_or(0, |s| Instant::now().duration_since(s).as_millis() as u64);
@@ -316,6 +340,28 @@ mod tests {
         assert_eq!(events.recv().await, Some(PlayoutEvent::Drained));
         // 90 ms of audio with 60 ms lead: drained after ~90 ms, not instantly.
         assert!(start.elapsed() >= Duration::from_millis(80));
+    }
+
+    #[tokio::test]
+    async fn a_jump_clip_plays_before_a_clause_still_waiting_for_audio() {
+        let (out_tx, mut out_rx) = mpsc::channel(1024);
+        let (playout, mut events) = Playout::spawn(out_tx, Duration::from_millis(60));
+        // Clause 1 is registered but its TTS has not answered yet.
+        playout.send(PlayoutCmd::Register(1)).await;
+        playout.jump_clip(9, Bytes::from(vec![9u8; 320])).await;
+        assert_eq!(events.recv().await, Some(PlayoutEvent::Started(9)));
+        playout
+            .send(PlayoutCmd::Audio(1, Bytes::from(vec![1u8; 320])))
+            .await;
+        playout.send(PlayoutCmd::End(1)).await;
+        assert_eq!(events.recv().await, Some(PlayoutEvent::Started(1)));
+        let mut checkpoints = Vec::new();
+        while checkpoints.len() < 2 {
+            if let Some(MediaOut::Checkpoint(n)) = out_rx.recv().await {
+                checkpoints.push(n);
+            }
+        }
+        assert_eq!(checkpoints, vec!["c9", "c1"]);
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use audio::frame::Framer;
 use axum::extract::ws::{Message, WebSocket};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use common::{
-    ids::{CallId, KbId, TenantId, DEFAULT_TENANT},
+    ids::{AgentId, CallId, KbId, TenantId, DEFAULT_TENANT},
     mask::mask_phone,
     AppError, ErrorCode,
 };
@@ -40,6 +40,10 @@ pub struct CreateCall {
     pub to: String,
     /// Lead's name.
     pub lead_name: String,
+    /// Agent to use (`/v1/agents`): its prompt, fields to collect,
+    /// knowledge base and defaults. Fields set in this request win.
+    #[serde(default)]
+    pub agent_id: Option<AgentId>,
     /// Persona name (`prompts/personas/<name>.txt`): who the agent is and
     /// what the call is for.
     #[serde(default)]
@@ -72,15 +76,16 @@ pub struct CreateCall {
     #[serde(default)]
     pub max_duration_secs: Option<u32>,
     /// Lets the agent check and book appointments (`config/booking.toml`).
+    /// Defaults to the agent's setting, else off.
     #[serde(default)]
-    pub booking: bool,
+    pub booking: Option<bool>,
 }
 
 /// Validates the request, prepares greeting audio and knowledge, stores
 /// the call and registers it. Simulated calls skip Plivo and call hours.
 pub async fn create(
     state: &AppState,
-    req: CreateCall,
+    mut req: CreateCall,
     simulated: bool,
 ) -> Result<Arc<CallSlot>, AppError> {
     let tenant = DEFAULT_TENANT;
@@ -101,6 +106,27 @@ pub async fn create(
             "`lead_name` must be 1-100 characters",
         ));
     }
+    let agent = match req.agent_id {
+        Some(id) => Some(super::agents::get(state, tenant, id).await?),
+        None => None,
+    };
+    if let Some(a) = &agent {
+        if req.persona.is_some() {
+            return Err(AppError::bad_request(
+                "give `agent_id` or `persona`, not both",
+            ));
+        }
+        req.knowledge_base_id = req.knowledge_base_id.or(a.kb_id.map(KbId));
+        req.greeting = req.greeting.take().or_else(|| a.greeting.clone());
+        req.language = req.language.take().or_else(|| Some(a.language.clone()));
+        req.voice = req.voice.take().or_else(|| a.voice.clone());
+        req.booking = req.booking.or(Some(a.booking));
+        req.max_duration_secs = req
+            .max_duration_secs
+            .or(a.max_duration_secs.and_then(|d| u32::try_from(d).ok()));
+    }
+    let booking = req.booking.unwrap_or(false);
+    let fields = agent.as_ref().map(|a| a.fields.clone()).unwrap_or_default();
     if req.system_prompt.len() > 20_000 {
         return Err(AppError::bad_request(
             "`system_prompt` must be at most 20000 bytes",
@@ -117,9 +143,9 @@ pub async fn create(
         })?),
         None => None,
     };
-    if persona.is_none() && req.system_prompt.trim().is_empty() {
+    if persona.is_none() && agent.is_none() && req.system_prompt.trim().is_empty() {
         return Err(AppError::bad_request(
-            "give a `persona` or a `system_prompt`",
+            "give an `agent_id`, a `persona` or a `system_prompt`",
         ));
     }
     if let Some(model) = &req.llm_model {
@@ -162,18 +188,30 @@ pub async fn create(
     if let Some(g) = &req.greeting {
         check_greeting(g)?;
     }
-    if req.booking && state.booking.is_none() {
+    if booking && state.booking.is_none() {
         return Err(AppError::bad_request(
             "`booking` needs a valid config/booking.toml",
         ));
     }
-    // The persona, then this call's extra instructions.
-    let system_prompt = [persona.map(String::as_str), Some(req.system_prompt.trim())]
-        .into_iter()
-        .flatten()
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    // The persona or agent, this call's extra instructions, the details
+    // the agent should collect, then lessons from past calls (train.md).
+    let collect = super::agents::collect_prompt(&fields);
+    let training = super::training::training_prompt(
+        &state.assets.train,
+        agent.as_ref().map_or("", |a| a.training_notes.as_str()),
+    );
+    let system_prompt = [
+        persona.map(String::as_str),
+        agent.as_ref().map(|a| a.prompt.as_str()),
+        Some(req.system_prompt.trim()),
+        Some(collect.as_str()),
+        Some(training.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|p| !p.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
     if req
         .greeting
         .as_ref()
@@ -272,10 +310,10 @@ pub async fn create(
     let (disclosure_audio, greeting_audio, kb_context) = tokio::join!(
         state
             .lines
-            .get_or_synthesize(tenant, &voice, &lines.disclosure),
+            .get_or_synthesize_billed(tenant, &voice, &lines.disclosure),
         state
             .lines
-            .get_or_synthesize(tenant, &voice, greeting_body.trim()),
+            .get_or_synthesize_billed(tenant, &voice, greeting_body.trim()),
         async {
             match req.knowledge_base_id {
                 Some(kb) if state.kb.available() => state.kb.search(kb, &kb_query, 3).await.ok(),
@@ -283,8 +321,13 @@ pub async fn create(
             }
         }
     );
-    let cached = |clip: Result<bytes::Bytes, AppError>, what: &str| match clip {
-        Ok(a) => Some(a),
+    // TTS for a greeting not in the cache yet is this call's cost.
+    let mut greeting_tts_inr = 0.0;
+    let mut cached = |clip: Result<(bytes::Bytes, f64), AppError>, what: &str| match clip {
+        Ok((a, cost)) => {
+            greeting_tts_inr += cost;
+            Some(a)
+        }
         Err(e) => {
             tracing::warn!(call = %call_id, error = %e, "{what} not cached; will synthesize live");
             None
@@ -300,8 +343,8 @@ pub async fn create(
     });
 
     sqlx::query(
-        "INSERT INTO calls (id, tenant_id, to_number, lead_name, system_prompt, kb_id, language, voice, greeting, max_duration_secs, status) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')",
+        "INSERT INTO calls (id, tenant_id, to_number, lead_name, system_prompt, kb_id, language, voice, greeting, max_duration_secs, status, agent_id, collect_fields, cost_inr, cost_breakdown) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued', $11, $12, $13, jsonb_build_object('tts_greeting', $13::float8))",
     )
     .bind(call_id.0)
     .bind(tenant.0)
@@ -313,6 +356,9 @@ pub async fn create(
     .bind(&req.voice)
     .bind(&greeting_text)
     .bind(max_duration as i32)
+    .bind(agent.as_ref().map(|a| a.id))
+    .bind(sqlx::types::Json(&fields))
+    .bind(greeting_tts_inr)
     .execute(&state.db)
     .await?;
 
@@ -325,10 +371,16 @@ pub async fn create(
             lead_name: req.lead_name.trim().to_owned(),
             system_prompt: system_prompt.clone(),
             has_kb: req.knowledge_base_id.is_some() && state.kb.available(),
-            has_booking: req.booking,
-            today: match (&state.booking, req.booking) {
+            has_booking: booking,
+            today: match (&state.booking, booking) {
                 (Some(b), true) => b.calendar_line(chrono::Utc::now()),
-                _ => String::new(),
+                // Without booking the agent still needs dates for "next Saturday".
+                _ => super::booking::date_line(
+                    chrono::Utc::now()
+                        .with_timezone(&chrono_tz::Asia::Kolkata)
+                        .date_naive(),
+                    14,
+                ),
             },
             kb_context,
             fixed_language,
@@ -356,39 +408,20 @@ pub async fn create(
     });
     state.calls.insert(slot.clone());
 
-    // Cache the fixed lines and common phrases in the background: this
-    // call's voice first, then every other language's voice, so a call that
-    // switches language still plays them instantly. Only missing audio is
-    // synthesized (once, then it is stored).
+    // Cache this call's fixed lines and common phrases in the background
+    // (only missing audio is synthesized, once, then stored). Other
+    // languages are warmed by `warm_all_voices` while no call is live: doing
+    // them here made every call burst TTS requests and hit Sarvam's rate
+    // limit, which broke the live audio.
     {
         let state = state.clone();
-        let default_model = cfg.sarvam.tts_model.clone();
-        tokio::spawn(async move {
-            state
-                .lines
-                .warm(tenant, &voice, line_texts(&state, &voice.language))
-                .await;
-            let others: Vec<String> = state
-                .assets
-                .voices
-                .languages
-                .keys()
-                .filter(|l| **l != voice.language)
-                .cloned()
-                .collect();
-            for language in others {
-                let other = state.assets.voices.resolve(&language, &default_model, None);
-                let mut texts = line_texts(&state, &language);
-                texts.extend(
-                    state
-                        .assets
-                        .voices
-                        .intro(&language, &other)
-                        .map(str::to_owned),
-                );
-                state.lines.warm(tenant, &other, texts).await;
-            }
-        });
+        let missing: Vec<String> = line_texts(&state, &voice.language)
+            .into_iter()
+            .filter(|t| !state.lines.has(&voice, t))
+            .collect();
+        if !missing.is_empty() {
+            tokio::spawn(async move { state.lines.warm(tenant, &voice, missing).await });
+        }
     }
 
     if !simulated {
@@ -492,6 +525,54 @@ pub async fn prewarm(state: AppState, slot: Arc<CallSlot>) {
 
 /// Fixed lines and phrases worth caching for `language`. A language without
 /// its own lines file gets none: its fallback lines would be in English.
+/// Synthesizes every language's fixed lines, phrases and voice intro that
+/// are not cached yet, one request at a time and only while no call is
+/// live, so a call that switches language plays them instantly without
+/// this ever competing with a call for the TTS rate limit. Run once after
+/// startup.
+pub async fn warm_all_voices(state: &AppState) {
+    let tenant = DEFAULT_TENANT;
+    let mut languages: Vec<String> = state.assets.voices.languages.keys().cloned().collect();
+    languages.sort();
+    let (mut made, mut failed) = (0u32, 0u32);
+    for language in languages {
+        let voice = state
+            .assets
+            .voices
+            .resolve(&language, &state.config.sarvam.tts_model, None);
+        let mut texts = line_texts(state, &language);
+        texts.extend(
+            state
+                .assets
+                .voices
+                .intro(&language, &voice)
+                .map(str::to_owned),
+        );
+        for text in texts {
+            if state.lines.has(&voice, &text) {
+                continue;
+            }
+            while !state.calls.is_empty() {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            if state.lifecycle.is_draining() {
+                return;
+            }
+            match state.lines.get_or_synthesize(tenant, &voice, &text).await {
+                Ok(_) => made += 1,
+                Err(e) => {
+                    failed += 1;
+                    tracing::debug!(%language, error = %e, "warm-up line failed; will retry next start");
+                    // Back off: failures are usually rate limits or timeouts.
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    tracing::info!(made, failed, "all voices warmed");
+}
+
 fn line_texts(state: &AppState, language: &str) -> Vec<String> {
     if !state.assets.line_languages().any(|l| l == language) {
         return Vec::new();
@@ -531,7 +612,7 @@ const MAX_GREETING_CHARS: usize = 100;
 
 /// A request's greeting must be short: the disclosure is added by the
 /// system, so the greeting only introduces the caller's reason for calling.
-fn check_greeting(greeting: &str) -> Result<(), AppError> {
+pub(crate) fn check_greeting(greeting: &str) -> Result<(), AppError> {
     let chars = greeting.trim().chars().count();
     if chars > MAX_GREETING_CHARS {
         return Err(AppError::bad_request(format!(

@@ -1,6 +1,6 @@
 # Tamil fixed lines (gender-neutral). Have a native speaker review before production.
-disclosure = "வணக்கம், இது ஒரு AI உதவியாளர் அழைப்பு, இந்த அழைப்பு பதிவு செய்யப்படுகிறது."
-default_greeting = "நான் {name} அவர்களிடம் பேசுகிறேனா?"
+disclosure = "இது ஒரு AI உதவியாளர், இந்த அழைப்பு பதிவு செய்யப்படுகிறது."
+default_greeting = "வணக்கம், நான் {name} அவர்களிடம் பேசுகிறேனா?"
 reprompt = "நீங்கள் லைனில் இருக்கிறீர்களா?"
 silence_goodbye = "உங்கள் குரல் கேட்கவில்லை, அதனால் இந்த அழைப்பை முடிக்கிறேன். நன்றி!"
 goodbye = "உங்கள் நேரத்திற்கு நன்றி. வணக்கம்!"

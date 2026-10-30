@@ -9,8 +9,14 @@
 //!   previous clause boundary; the caller then plays the fixed
 //!   "I'll send that on WhatsApp" line.
 //! - **Clause chunking:** a clause ends at `.`, `?`, `!`, `।`, `॥` or a
-//!   newline, or at `,` once it has at least 4 words. The boundary must
-//!   be followed by whitespace, so `2.5` and `www.` never split.
+//!   newline, or at `,` once it has at least [`COMMA_SPLIT_WORDS`] words.
+//!   A whole sentence goes to TTS in one piece so its intonation stays
+//!   natural; only a long sentence is split at a comma, to keep the first
+//!   audio fast. The boundary must be followed by whitespace, so `2.5` and
+//!   `www.` never split.
+//! - **Finished endings:** text left when the stream ends, or a clause cut
+//!   at a word, gets a full stop, so TTS ends it with a falling tone
+//!   instead of stopping mid-phrase.
 //! - **Per-turn cap:** no clause is sent past `max_turn_chars`; the turn
 //!   ends at the last whole clause (the first clause is cut at a word
 //!   boundary if it alone is too long).
@@ -50,6 +56,11 @@ static UNSPEAKABLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:https?://|www\.)\S|[\w.+-]+@[\w-]+\.[a-z]|(?:\d[\s-]?){7}\d")
         .unwrap_or_else(|_| Regex::new("$^").unwrap_or_else(|_| unreachable!()))
 });
+
+/// Words a clause needs before a comma may end it. Shorter sentences are
+/// sent whole: TTS speaks each clause as its own utterance, so a split at
+/// "A plot, estate, villa, | or still exploring?" sounds broken.
+const COMMA_SPLIT_WORDS: usize = 12;
 
 /// Tone tags ("[happy]") that slipped past the turn's leading-tag reader.
 static TONE_TAG: LazyLock<Regex> = LazyLock::new(|| {
@@ -146,7 +157,7 @@ impl Shaper {
         if truncated && self.emitted_chars > 0 {
             return out;
         }
-        self.emit(&rest, &mut out);
+        self.emit(&with_full_stop(&sanitize(&rest)), &mut out);
         out
     }
 
@@ -221,7 +232,7 @@ fn next_boundary(s: &str, at_end: bool) -> Option<usize> {
             in_word = true;
             words += 1;
         }
-        let candidate = is_terminal(c) || (c == ',' && words >= 4);
+        let candidate = is_terminal(c) || (c == ',' && words >= COMMA_SPLIT_WORDS);
         if !candidate {
             continue;
         }
@@ -293,16 +304,30 @@ fn is_emoji(c: char) -> bool {
 }
 
 /// The longest prefix of `s` with at most `max` characters, ending at a
-/// word boundary.
+/// word boundary and closed with a full stop.
 fn cut_at_word(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
-    let prefix: String = s.chars().take(max).collect();
-    match prefix.rfind(char::is_whitespace) {
-        Some(i) if i > 0 => prefix[..i].trim_end_matches([',', ' ']).to_owned(),
-        _ => prefix,
+    let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+    let cut = match prefix.rfind(char::is_whitespace) {
+        Some(i) if i > 0 => &prefix[..i],
+        _ => prefix.as_str(),
+    };
+    with_full_stop(cut)
+}
+
+/// `s` ending in sentence punctuation: a trailing comma, colon or dash is
+/// replaced by a full stop, and one is added if missing.
+fn with_full_stop(s: &str) -> String {
+    let t = s
+        .trim_end()
+        .trim_end_matches([',', ';', ':', '-', '–', '—'])
+        .trim_end();
+    if t.is_empty() || t.ends_with(['.', '?', '!', '।', '॥']) {
+        return t.to_owned();
     }
+    format!("{t}.")
 }
 
 #[cfg(test)]
@@ -330,9 +355,50 @@ mod tests {
         let out = s.push(" clinics get more patients, through ads. Which");
         assert_eq!(
             out.clauses,
-            vec!["We help clinics get more patients,", "through ads."]
+            vec!["We help clinics get more patients, through ads."]
         );
-        assert_eq!(s.finish(false).clauses, vec!["Which"]);
+        assert_eq!(s.finish(false).clauses, vec!["Which."]);
+    }
+
+    #[test]
+    fn a_normal_sentence_is_never_split_at_a_comma() {
+        let (c, _) = run(
+            &["Good. What kind of property are you looking for? A plot, estate, villa, or still exploring?"],
+            250,
+            4000,
+        );
+        assert_eq!(
+            c,
+            vec![
+                "Good.",
+                "What kind of property are you looking for?",
+                "A plot, estate, villa, or still exploring?"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_sentence_splits_at_a_comma_after_twelve_words() {
+        let (c, _) = run(
+            &["Star Garden has forty six plots on ten acres of working coffee near Madikeri, with a clubhouse and a pool."],
+            250,
+            4000,
+        );
+        assert_eq!(
+            c,
+            vec![
+                "Star Garden has forty six plots on ten acres of working coffee near Madikeri,",
+                "with a clubhouse and a pool."
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unfinished_ending_gets_a_full_stop() {
+        let (c, _) = run(&["Sure. We can arrange a visit on Saturday,"], 250, 4000);
+        assert_eq!(c, vec!["Sure.", "We can arrange a visit on Saturday."]);
+        let (c, _) = run(&["Is that okay?"], 250, 4000);
+        assert_eq!(c, vec!["Is that okay?"]);
     }
 
     #[test]
@@ -353,8 +419,7 @@ mod tests {
                 "Got it.",
                 "Hmm...",
                 "we help clinics with ads.",
-                "It works well, really well,",
-                "for many."
+                "It works well, really well, for many."
             ]
         );
         assert_eq!(out.stop, Some(StopReason::TurnCap));
@@ -377,7 +442,7 @@ mod tests {
     #[test]
     fn hindi_danda_and_tamil() {
         let (c, _) = run(&["जी हाँ। हम आपकी मदद", " कर सकते हैं। क्या आप"], 250, 4000);
-        assert_eq!(c, vec!["जी हाँ।", "हम आपकी मदद कर सकते हैं।", "क्या आप"]);
+        assert_eq!(c, vec!["जी हाँ।", "हम आपकी मदद कर सकते हैं।", "क्या आप."]);
         let (t, _) = run(&["வணக்கம். உங்களுக்கு எப்படி உதவலாம்?"], 250, 4000);
         assert_eq!(t, vec!["வணக்கம்.", "உங்களுக்கு எப்படி உதவலாம்?"]);
     }
@@ -433,7 +498,7 @@ mod tests {
         let (c, stop) = run(&[&long], 30, 4000);
         assert_eq!(c.len(), 1);
         assert!(c[0].chars().count() <= 30);
-        assert!(!c[0].ends_with(' '));
+        assert!(c[0].ends_with("word."));
         assert_eq!(stop, Some(StopReason::TurnCap));
     }
 
@@ -451,7 +516,7 @@ mod tests {
         assert!(s.finish(true).clauses.is_empty());
         let mut s = Shaper::new(250, 4000);
         s.push("only partial");
-        assert_eq!(s.finish(true).clauses, vec!["only partial"]);
+        assert_eq!(s.finish(true).clauses, vec!["only partial."]);
     }
 
     #[test]

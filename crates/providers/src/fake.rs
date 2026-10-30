@@ -35,7 +35,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Fake STT: returns the next scripted transcript for each utterance.
 #[derive(Debug, Clone, Default)]
 pub struct FakeStt {
-    /// Transcripts returned in order; when empty, `"fake utterance N"`.
+    /// Transcripts returned in order; when empty, `"fake utterance N"`. A
+    /// line starting `[[ta-IN]]` reports that language for this final.
     pub script: Arc<Mutex<VecDeque<String>>>,
     /// Language reported with each final (auto-detect simulation).
     pub language: Option<String>,
@@ -92,7 +93,13 @@ impl SttProvider for FakeStt {
                             .pop_front()
                             .unwrap_or_else(|| format!("fake utterance {utterance}"));
                         let evt_tx = evt_tx.clone();
-                        let language = this.language.clone();
+                        let (language, text) = match text
+                            .strip_prefix("[[")
+                            .and_then(|rest| rest.split_once("]]"))
+                        {
+                            Some((lang, rest)) => (Some(lang.to_owned()), rest.to_owned()),
+                            None => (this.language.clone(), text),
+                        };
                         let delay = this.final_delay;
                         let u = utterance;
                         tokio::spawn(async move {
@@ -146,6 +153,11 @@ pub struct FakeTts {
     pub chunk_delay: Duration,
     /// Audio length per character; zero means 5 ms. Real speech is ~60 ms.
     pub audio_per_char: Duration,
+    /// The next this-many `Speak`s close the session without audio, like
+    /// a rate-limited Sarvam socket.
+    pub fail_speaks: Arc<AtomicUsize>,
+    /// The next this-many `Speak`s never answer (a stuck socket).
+    pub stall_speaks: Arc<AtomicUsize>,
 }
 
 impl FakeTts {
@@ -174,6 +186,28 @@ impl TtsProvider for FakeTts {
                     TtsCommand::Configure(v) => (speaker, pace) = (v.speaker, v.pace),
                     TtsCommand::Close => break,
                     TtsCommand::Speak { id, text } => {
+                        // Takes one from a counter that is not yet zero.
+                        let take = |n: &AtomicUsize| {
+                            let mut v = n.load(Ordering::SeqCst);
+                            while v > 0 {
+                                match n.compare_exchange(
+                                    v,
+                                    v - 1,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                ) {
+                                    Ok(_) => return true,
+                                    Err(now) => v = now,
+                                }
+                            }
+                            false
+                        };
+                        if take(&this.fail_speaks) {
+                            return;
+                        }
+                        if take(&this.stall_speaks) {
+                            continue;
+                        }
                         lock(&this.spoken).push(text.clone());
                         lock(&this.speakers).push(speaker.clone());
                         lock(&this.paces).push(pace);

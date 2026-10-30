@@ -29,6 +29,7 @@ use common::{
 };
 use providers::{
     llm::{ChatMessage, Role},
+    metered::MeteredLlm,
     stt::{SttCommand, SttEvent, SttOptions, SttSession},
     tts::{TtsCommand, TtsEvent, TtsSession},
     ProviderError,
@@ -62,6 +63,8 @@ const CONTINUATION_MAX_CHARS: usize = 12;
 const LEARN_MAX_CHARS: usize = 40;
 /// Minimum STT language confidence to switch voices.
 const LANGUAGE_CONFIDENCE: f32 = 0.6;
+/// Caller turns in a row in another language before a second automatic switch.
+const RESWITCH_TURNS: u8 = 3;
 /// Plivo starts billing at answer, a little before our media stream starts.
 const ANSWER_TO_STREAM: Duration = Duration::from_secs(1);
 /// Caller audio kept per turn for re-transcription after the call. A file
@@ -70,10 +73,58 @@ const ANSWER_TO_STREAM: Duration = Duration::from_secs(1);
 const USER_AUDIO_MAX_BYTES: usize = 31 * audio::SAMPLE_RATE as usize;
 /// Safety net once the call is ending.
 const ENDING_TIMEOUT: Duration = Duration::from_secs(15);
-/// Caller speech with no words transcribed yet that still interrupts the
-/// agent. The first partial transcript takes about 0.9 s, so cutting off
-/// sooner stops the agent mid-sentence for a "yeah" or "hmm".
-const BARGE_IN_UNHEARD_MS: u32 = 1200;
+/// Speech asked of TTS with no audio back for this long: the socket is
+/// stuck (rate limit, network), so the clause is retried on another.
+/// Normal first audio takes 0.3-1.3 s.
+const TTS_STALL: Duration = Duration::from_secs(2);
+/// Times unplayed clauses are resent after TTS failures in a row.
+const TTS_MAX_RETRIES: u32 = 3;
+
+/// Single words that do interrupt the agent ("wait", "no").
+const STOP_WORDS: &[&str] = &[
+    "wait",
+    "stop",
+    "no",
+    "sorry",
+    "excuse",
+    "hold",
+    "ruko",
+    "rukiye",
+    "nahi",
+    "nahin",
+    "रुको",
+    "रुकिए",
+    "नहीं",
+    "नही",
+    "ಬೇಡ",
+    "ನಿಲ್ಲಿ",
+    "ಇಲ್ಲ",
+    "வேண்டாம்",
+    "இல்ல",
+    "இல்லை",
+    "నో",
+    "వద్దు",
+    "ఆగండి",
+    "లేదు",
+    "വേണ്ട",
+    "ഇല്ല",
+    "না",
+];
+
+/// Whether caller speech over the agent is an interruption. `firm_ms` is
+/// how long they have spoken clearly; `partial` is the transcript so far.
+/// "Wait" or "no" interrupts after `min_ms`, other speech after `talk_ms`;
+/// "yeah", "hmm" and short or unclear sounds let the agent carry on.
+fn interrupts(partial: Option<&str>, firm_ms: u32, min_ms: u32, talk_ms: u32) -> bool {
+    if firm_ms < min_ms {
+        return false;
+    }
+    match partial.map(normalize).filter(|p| !p.is_empty()) {
+        Some(p) if is_backchannel(&p) => false,
+        Some(p) if STOP_WORDS.iter().any(|w| normalize(w) == p) => true,
+        _ => firm_ms >= talk_ms.max(min_ms),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -188,6 +239,7 @@ pub async fn run_call(
         agent_name: agent_name.as_deref(),
     });
     let call_deadline = Instant::now() + params.max_duration;
+    let llm = Arc::new(MeteredLlm::new(deps.llm.clone()));
     let mut actor = Actor {
         vad: deps.vad.open(),
         language: params.initial_language.clone(),
@@ -196,9 +248,12 @@ pub async fn run_call(
         agent_name,
         language_confirmed: params.fixed_language.is_some(),
         lang_candidate: None,
+        language_switches: 0,
+        held_remark: None,
         p: params,
         s: settings,
         deps,
+        llm,
         tools,
         control,
         media_out,
@@ -226,6 +281,7 @@ pub async fn run_call(
         speech_run_ms: 0,
         silence_run_ms: 0,
         utterance_ms: 0,
+        firm_ms: 0,
         last_voiced: None,
         gate_open: false,
         preroll: PreRoll::new(PREROLL_FRAMES),
@@ -238,6 +294,10 @@ pub async fn run_call(
         clause_owner: HashMap::new(),
         started_clauses: HashSet::new(),
         tts_outstanding: HashSet::new(),
+        tts_texts: HashMap::new(),
+        tts_heard: HashSet::new(),
+        tts_failures: 0,
+        tts_deadline: None,
         learning: HashMap::new(),
         playout_idle: true,
         after: After::Listen,
@@ -246,6 +306,8 @@ pub async fn run_call(
         system,
         silence_deadline: None,
         ack_deadline: None,
+        late_deadline: None,
+        late_filler: None,
         checkings: 0,
         silence_strikes: 0,
         call_deadline,
@@ -263,6 +325,9 @@ struct Actor {
     p: CallParams,
     s: Arc<PipelineSettings>,
     deps: Deps,
+    /// The call's LLM: records the usage of every reply stream, including
+    /// the ones cut short.
+    llm: Arc<MeteredLlm>,
     tools: Arc<dyn ToolBackend>,
     control: Arc<dyn CallControl>,
     media_out: mpsc::Sender<MediaOut>,
@@ -295,6 +360,13 @@ struct Actor {
     language: String,
     language_confirmed: bool,
     lang_candidate: Option<(String, u8)>,
+    /// Language changes so far. After the first, detection needs the caller
+    /// to speak the other language for `RESWITCH_TURNS` turns in a row
+    /// (asking for it still switches at once), so the call stays in one
+    /// language instead of flipping on code-mixed speech.
+    language_switches: u32,
+    /// What the caller said briefly over the agent, answered once it finishes.
+    held_remark: Option<String>,
 
     phase: Phase,
     stream_started: Instant,
@@ -306,6 +378,8 @@ struct Actor {
     speech_run_ms: u32,
     silence_run_ms: u32,
     utterance_ms: u32,
+    /// Speech in this utterance clear enough to interrupt the agent.
+    firm_ms: u32,
     last_voiced: Option<Instant>,
     gate_open: bool,
     preroll: PreRoll,
@@ -319,6 +393,14 @@ struct Actor {
     clause_owner: HashMap<u64, Owner>,
     started_clauses: HashSet<u64>,
     tts_outstanding: HashSet<u64>,
+    /// Text of each outstanding clause, to resend it if TTS fails.
+    tts_texts: HashMap<u64, String>,
+    /// Outstanding clauses that have started returning audio.
+    tts_heard: HashSet<u64>,
+    /// TTS failures since audio last arrived.
+    tts_failures: u32,
+    /// Retry (see `TTS_STALL`) if no audio arrives by then.
+    tts_deadline: Option<Instant>,
     /// Short reply clauses being synthesized, kept to offer to the cache.
     learning: HashMap<u64, (Voice, String, Vec<u8>)>,
     playout_idle: bool,
@@ -331,6 +413,12 @@ struct Actor {
     /// Answer the held "yes" / "hmm" in `pending_user` at this time unless
     /// the caller goes on (see `ack_wait`).
     ack_deadline: Option<Instant>,
+    /// Play a "one sec" filler at this time if the reply has not started
+    /// (see `late_reply`).
+    late_deadline: Option<Instant>,
+    /// The filler clause of the current turn; it does not count as the
+    /// reply's first audio.
+    late_filler: Option<u64>,
     /// Checking fillers played so far, to take the next variant.
     checkings: usize,
     silence_strikes: u8,
@@ -498,6 +586,21 @@ const BACKCHANNEL_WORDS: &[&str] = &[
 /// Most words a backchannel can have ("yeah okay sure").
 const BACKCHANNEL_MAX_WORDS: usize = 3;
 
+/// One-word starts of a sentence ("I", "and", "however"): on their own
+/// they are not a turn, so the agent waits for more and otherwise ignores
+/// them instead of answering "sorry, say that again?".
+const FRAGMENT_WORDS: &[&str] = &[
+    "i", "and", "but", "however", "so", "um", "uh", "umm", "the", "a", "well", "actually", "also",
+    "then", "because", "like", "if", "or", "what", "my", "we", "it",
+];
+
+/// `true` when `text` is a single word that only starts a sentence.
+fn is_fragment(text: &str) -> bool {
+    let norm = normalize(text);
+    let mut words = norm.split_whitespace();
+    matches!((words.next(), words.next()), (Some(w), None) if FRAGMENT_WORDS.contains(&w))
+}
+
 /// `true` when `text` is only an acknowledgement or "hello": it should not
 /// interrupt the agent, and on its own it is not a turn during the greeting.
 fn is_backchannel(text: &str) -> bool {
@@ -539,6 +642,8 @@ impl Actor {
             let deadline = [
                 self.silence_deadline,
                 self.ack_deadline,
+                self.late_deadline,
+                self.tts_deadline,
                 Some(self.call_deadline),
                 self.hard_deadline,
             ]
@@ -606,9 +711,8 @@ impl Actor {
                 Ev::Tts(Some(e)) => self.on_tts(e).await,
                 Ev::Tts(None) => {
                     tracing::warn!(call = %self.p.call_id, "tts session closed");
-                    self.abandon_tts_outstanding().await;
                     self.tts = None;
-                    self.promote_spare().await;
+                    self.retry_tts().await;
                 }
                 Ev::Spare(Some(r)) => self.on_spare(r).await,
                 Ev::Spare(None) => {}
@@ -834,6 +938,7 @@ impl Actor {
         self.pending_user.clear();
         self.phase = Phase::Thinking;
         self.after = After::Listen;
+        self.arm_late_reply();
         for e in held {
             Box::pin(self.on_turn_event(e)).await;
         }
@@ -901,6 +1006,9 @@ impl Actor {
             self.last_voiced = Some(Instant::from_std(v.at));
             if self.user_speaking {
                 self.utterance_ms += WINDOW_MS;
+                if v.prob >= self.s.barge_in_threshold {
+                    self.firm_ms += WINDOW_MS;
+                }
             }
         } else if v.prob < low {
             self.silence_run_ms += WINDOW_MS;
@@ -918,16 +1026,11 @@ impl Actor {
             return;
         }
         let barge_in_ms = self.s.barge_in_min.as_millis() as u32;
-        if self.phase == Phase::Speaking && self.utterance_ms >= barge_in_ms {
-            // "Yeah", "okay": keep talking. Without a transcript yet, wait
-            // for one before cutting the agent off.
-            let hold = match &self.last_partial {
-                Some((partial, _)) => is_backchannel(partial),
-                None => self.utterance_ms < BARGE_IN_UNHEARD_MS.max(barge_in_ms),
-            };
-            if !hold {
-                self.barge_in().await;
-            }
+        let partial = self.last_partial.as_ref().map(|(p, _)| p.as_str());
+        let talk_ms = self.s.barge_in_talk.as_millis() as u32;
+        if self.phase == Phase::Speaking && interrupts(partial, self.firm_ms, barge_in_ms, talk_ms)
+        {
+            self.barge_in().await;
         }
         if self.s.eager_llm
             && self.silence_run_ms >= EAGER_SILENCE_MS
@@ -952,6 +1055,7 @@ impl Actor {
     async fn on_speech_start(&mut self) {
         self.user_speaking = true;
         self.utterance_ms = self.speech_run_ms;
+        self.firm_ms = 0;
         self.silence_strikes = 0;
         self.silence_deadline = None;
         // The caller goes on after "yes": the next final joins onto it.
@@ -1002,8 +1106,12 @@ impl Actor {
                 if !text.is_empty() && self.last_partial.as_ref().map(|(t, _)| t) != Some(&text) {
                     let interrupts = self.phase == Phase::Speaking
                         && self.user_speaking
-                        && text.split_whitespace().count() >= 2
-                        && !is_backchannel(&text);
+                        && interrupts(
+                            Some(&text),
+                            self.firm_ms,
+                            self.s.barge_in_min.as_millis() as u32,
+                            self.s.barge_in_talk.as_millis() as u32,
+                        );
                     self.last_partial = Some((text, Instant::now()));
                     if interrupts {
                         self.barge_in().await;
@@ -1064,9 +1172,10 @@ impl Actor {
                         if normalize(&t.user_text) == normalize(&combined) {
                             t.speculative = false;
                             t.marks.stt_final = self.stt_final_at;
+                            let held = std::mem::take(&mut t.held);
                             self.pending_user.clear();
                             self.phase = Phase::Thinking;
-                            let held = std::mem::take(&mut t.held);
+                            self.arm_late_reply();
                             for e in held {
                                 Box::pin(self.on_turn_event(e)).await;
                             }
@@ -1088,9 +1197,28 @@ impl Actor {
                         && matches!(self.phase, Phase::Speaking | Phase::Thinking))
                 {
                     // Backchannel ("haan", "ok") while the agent talks: ignore.
-                    if is_backchannel(&combined) {
+                    if is_backchannel(&combined) || is_fragment(&combined) {
                         self.pending_user.clear();
                         self.drop_unused_audio();
+                        return;
+                    }
+                    // While the agent speaks, only "wait"/"no" or 2 s of real
+                    // talk interrupt; a short remark is answered afterwards.
+                    let speaking = self.phase == Phase::Speaking || greeting_body;
+                    if speaking
+                        && !interrupts(
+                            Some(&combined),
+                            self.firm_ms,
+                            self.s.barge_in_min.as_millis() as u32,
+                            self.s.barge_in_talk.as_millis() as u32,
+                        )
+                    {
+                        tracing::info!(call = %self.p.call_id, firm_ms = self.firm_ms, "short remark over the agent; answering after it");
+                        self.pending_user.clear();
+                        self.held_remark = Some(match self.held_remark.take() {
+                            Some(prev) => join_text(&prev, &combined),
+                            None => combined,
+                        });
                         return;
                     }
                     self.pending_user.clear();
@@ -1108,7 +1236,9 @@ impl Actor {
                 }
                 // "Yes..." / "So..." after a question is often the start of
                 // the answer: give the caller a moment to go on.
-                if !self.s.ack_wait.is_zero() && is_backchannel(&combined) {
+                if !self.s.ack_wait.is_zero()
+                    && (is_backchannel(&combined) || is_fragment(&combined))
+                {
                     if let Some(t) = self.turn.take() {
                         t.cancel.cancel();
                     }
@@ -1157,7 +1287,13 @@ impl Actor {
             _ => 1,
         };
         self.lang_candidate = Some((lang.to_owned(), count));
-        let needed = if self.language_confirmed { 2 } else { 1 };
+        let needed = if self.language_switches > 0 {
+            RESWITCH_TURNS
+        } else if self.language_confirmed {
+            2
+        } else {
+            1
+        };
         if count >= needed {
             self.switch_language(lang.to_owned()).await;
         }
@@ -1191,6 +1327,7 @@ impl Actor {
 
     async fn switch_language(&mut self, lang: String) {
         tracing::info!(call = %self.p.call_id, from = %self.language, to = %lang, "switching language");
+        self.language_switches += 1;
         self.language = lang.clone();
         self.language_confirmed = true;
         self.lang_candidate = None;
@@ -1329,7 +1466,11 @@ impl Actor {
     /// in English letters switches the call to that language first, so the
     /// reply comes in its own script (models otherwise answer it in English).
     async fn start_turn(&mut self, user_text: String, speculative: bool) {
-        if let Some(lang) = romanized_language(&user_text).filter(|l| *l != self.language) {
+        // Only the first change of language may come from English letters;
+        // later ones need the caller to ask (see `language_switches`).
+        let romanized = romanized_language(&user_text)
+            .filter(|l| *l != self.language && self.language_switches == 0);
+        if let Some(lang) = romanized {
             tracing::info!(call = %self.p.call_id, %lang, "caller wrote the language in English letters");
             self.switch_pinned(lang.to_owned(), "romanized").await;
         }
@@ -1337,11 +1478,29 @@ impl Actor {
     }
 
     fn start_turn_now(&mut self, user_text: String, speculative: bool) {
+        // A remark held while the agent spoke goes in front of this one.
+        let user_text = match self.held_remark.take() {
+            Some(held) if !speculative => join_text(&held, &user_text),
+            Some(held) => {
+                self.held_remark = Some(held);
+                user_text
+            }
+            None => user_text,
+        };
         let mut messages = prompt::assemble(&self.system, &self.history);
         // No billing-block hint for the LLM: told "N seconds left, wrap up if
         // done", it ended live conversations mid-question. The block is used
         // only for the max-duration closing and the short goodbye.
-        messages.push(ChatMessage::text(Role::User, user_text.clone()));
+        // After a switch away from English the history is still mostly
+        // English and models keep answering in it: remind them on every
+        // request (not stored in the history).
+        let request_text = if self.language.starts_with("en") {
+            user_text.clone()
+        } else {
+            let name = prompt::language_name(&self.language);
+            format!("{user_text}\n\n(Reply in {name}, in {name} script.)")
+        };
+        messages.push(ChatMessage::text(Role::User, request_text));
         let input = TurnInput {
             messages,
             tools: prompt::tools(self.p.has_kb, self.p.has_booking),
@@ -1362,12 +1521,7 @@ impl Actor {
             max_tokens: self.s.llm_max_tokens,
         };
         let cancel = CancellationToken::new();
-        let events = turn::spawn(
-            input,
-            self.deps.llm.clone(),
-            self.tools.clone(),
-            cancel.clone(),
-        );
+        let events = turn::spawn(input, self.llm.clone(), self.tools.clone(), cancel.clone());
         let id = self.next_turn;
         self.next_turn += 1;
         self.turn = Some(ActiveTurn {
@@ -1392,10 +1546,13 @@ impl Actor {
                 ..Marks::default()
             },
         });
+        self.late_filler = None;
+        self.late_deadline = None;
         if !speculative {
             self.pending_user.clear();
             self.phase = Phase::Thinking;
             self.after = After::Listen;
+            self.arm_late_reply();
         }
         self.silence_deadline = None;
     }
@@ -1506,10 +1663,9 @@ impl Actor {
                 }
             }
             TurnEvent::Finished(summary) => {
+                // Usage is counted by `self.llm` (see `finish`), so turns
+                // cut short are billed too.
                 self.commit_user();
-                for (model, usage) in &summary.usage {
-                    self.add_llm_usage(model, *usage);
-                }
                 self.history.extend(summary.tool_messages.iter().cloned());
                 for m in summary
                     .tool_messages
@@ -1579,6 +1735,60 @@ impl Actor {
         }
     }
 
+    /// Schedules the "one sec" filler for the current (committed) turn,
+    /// counted from when the caller stopped talking.
+    fn arm_late_reply(&mut self) {
+        if self.s.late_reply.is_zero() {
+            return;
+        }
+        let Some(t) = self.turn.as_ref() else { return };
+        if t.marks.first_sent.is_some() {
+            return;
+        }
+        let from = t.marks.speech_end.unwrap_or_else(Instant::now);
+        self.late_deadline = Some((from + self.s.late_reply).max(Instant::now()));
+    }
+
+    /// Plays a short cached filler ahead of a reply that is late (slow LLM
+    /// or a stalled TTS socket), so the caller is not left in silence.
+    async fn play_late_filler(&mut self) {
+        let waiting = self.phase == Phase::Thinking
+            && !self.user_speaking
+            && self.late_filler.is_none()
+            && self.turn.as_ref().is_some_and(|t| {
+                !t.speculative && !t.wait_greeting && t.marks.first_sent.is_none()
+            });
+        if !waiting {
+            return;
+        }
+        let lines = self.deps.assets.lines(&self.language);
+        let n = lines.checking.len();
+        let text = if n == 0 {
+            lines.one_moment.clone()
+        } else {
+            lines.checking[self.checkings % n].clone()
+        };
+        // Only cached audio: live TTS may be the very thing that is slow.
+        let Some(audio) = self.deps.lines.get(&self.voice, &text) else {
+            return;
+        };
+        let Some(turn_id) = self.turn.as_ref().map(|t| t.id) else {
+            return;
+        };
+        self.checkings += 1;
+        let id = self.next_clause;
+        self.next_clause += 1;
+        self.clause_owner.insert(id, Owner::Turn(turn_id));
+        self.playout_idle = false;
+        self.playout.jump_clip(id, audio).await;
+        self.late_filler = Some(id);
+        if let Some(t) = self.turn.as_mut() {
+            t.clauses.insert(0, (id, text));
+        }
+        tracing::info!(call = %self.p.call_id, turn = turn_id, "reply late; filler played");
+        metrics::counter!("voice_late_reply_fillers_total").increment(1);
+    }
+
     // ------------------------------------------------------------ speech ----
 
     async fn play_clip(&mut self, audio: Bytes, owner: Owner) -> u64 {
@@ -1615,15 +1825,22 @@ impl Actor {
         metrics::counter!(metric_names::TTS_CHARS_TOTAL, "model" => self.voice.model.clone())
             .increment(chars as u64);
         self.tts_outstanding.insert(id);
+        self.tts_texts.insert(id, text.clone());
+        if self.tts_deadline.is_none() {
+            self.tts_deadline = Some(Instant::now() + TTS_STALL);
+        }
         match &self.tts {
             Some(tts) => {
                 if tts
                     .commands
-                    .send(TtsCommand::Speak { id, text })
+                    .send(TtsCommand::Speak {
+                        id,
+                        text: text.clone(),
+                    })
                     .await
                     .is_err()
                 {
-                    self.tts_backlog.push((id, String::new()));
+                    self.tts_backlog.push((id, text));
                 }
             }
             None => self.tts_backlog.push((id, text)),
@@ -1645,11 +1862,21 @@ impl Actor {
                 if let Some((_, _, buf)) = self.learning.get_mut(&id) {
                     buf.extend_from_slice(&data);
                 }
+                if self.tts_outstanding.contains(&id) {
+                    self.tts_heard.insert(id);
+                    self.tts_failures = 0;
+                    self.tts_deadline = Some(Instant::now() + TTS_STALL);
+                }
                 self.playout.send(PlayoutCmd::Audio(id, data)).await;
             }
             TtsEvent::Done { id } => {
+                self.tts_texts.remove(&id);
+                self.tts_heard.remove(&id);
                 if self.tts_outstanding.remove(&id) {
                     self.playout.send(PlayoutCmd::End(id)).await;
+                }
+                if self.tts_outstanding.is_empty() {
+                    self.tts_deadline = None;
                 }
                 if let Some((voice, text, audio)) = self.learning.remove(&id) {
                     if !audio.is_empty() {
@@ -1661,11 +1888,10 @@ impl Actor {
             TtsEvent::Error { message, fatal } => {
                 tracing::warn!(call = %self.p.call_id, %message, fatal, "tts error");
                 if fatal {
-                    self.abandon_tts_outstanding().await;
                     if let Some(s) = self.tts.take() {
                         let _ = s.commands.send(TtsCommand::Close).await;
                     }
-                    self.promote_spare().await;
+                    self.retry_tts().await;
                 }
             }
         }
@@ -1680,9 +1906,59 @@ impl Actor {
             && (name.is_empty() || !text.to_lowercase().contains(&name))
     }
 
+    /// TTS failed (socket closed, fatal error or stalled): resend the
+    /// clauses that have not started playing on a fresh socket, after a
+    /// growing pause so a rate limit can clear. Clauses already partly
+    /// played are ended (resending would repeat their start). After
+    /// `TTS_MAX_RETRIES` failures in a row, everything outstanding is
+    /// dropped so the call can go on.
+    async fn retry_tts(&mut self) {
+        if let Some(s) = self.tts.take() {
+            let _ = s.commands.send(TtsCommand::Close).await;
+        }
+        self.tts_failures += 1;
+        metrics::counter!("voice_tts_failures_total").increment(1);
+        if self.tts_failures > TTS_MAX_RETRIES {
+            tracing::warn!(call = %self.p.call_id, "tts keeps failing; dropping unplayed speech");
+            self.abandon_tts_outstanding().await;
+            self.promote_spare().await;
+            return;
+        }
+        let mut ids: Vec<u64> = self.tts_outstanding.iter().copied().collect();
+        ids.sort_unstable();
+        let mut resend = Vec::new();
+        for id in ids {
+            match self.tts_texts.get(&id) {
+                Some(text) if !self.tts_heard.contains(&id) => resend.push((id, text.clone())),
+                _ => {
+                    self.tts_outstanding.remove(&id);
+                    self.tts_texts.remove(&id);
+                    self.tts_heard.remove(&id);
+                    self.learning.remove(&id);
+                    self.playout.send(PlayoutCmd::End(id)).await;
+                }
+            }
+        }
+        tracing::info!(call = %self.p.call_id, clauses = resend.len(), attempt = self.tts_failures, "retrying tts");
+        self.tts_backlog = resend;
+        self.tts_deadline =
+            (!self.tts_outstanding.is_empty()).then(|| Instant::now() + TTS_STALL * 2);
+        // The spare may come from the same rate-limited moment: give it a
+        // pause first, longer on each failure in a row.
+        let pause = Duration::from_millis(250 << (self.tts_failures - 1));
+        if let Some(spare) = self.tts_spare.take() {
+            let _ = spare.commands.send(TtsCommand::Close).await;
+        }
+        self.open_spare_after(pause);
+        self.check_quiet().await;
+    }
+
     /// Ends every clause still waiting for TTS (their audio will not come).
     async fn abandon_tts_outstanding(&mut self) {
         self.learning.clear();
+        self.tts_texts.clear();
+        self.tts_heard.clear();
+        self.tts_deadline = None;
         let ids: Vec<u64> = self.tts_outstanding.drain().collect();
         for id in ids {
             self.playout.send(PlayoutCmd::End(id)).await;
@@ -1692,11 +1968,18 @@ impl Actor {
     }
 
     fn open_spare(&mut self) {
+        self.open_spare_after(Duration::ZERO);
+    }
+
+    fn open_spare_after(&mut self, pause: Duration) {
         self.spare_opening += 1;
         let tts = self.deps.tts.clone();
         let voice = self.voice.clone();
         let tx = self.spare_tx.clone();
         tokio::spawn(async move {
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+            }
             let _ = tx.send(tts.open(&voice).await).await;
         });
     }
@@ -1725,8 +2008,8 @@ impl Actor {
             Err(e) => {
                 tracing::warn!(call = %self.p.call_id, error = %e, "tts open failed");
                 if self.tts.is_none() && self.spare_opening == 0 && !self.done {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    self.open_spare();
+                    // Retry without blocking the call loop.
+                    self.open_spare_after(Duration::from_millis(500));
                 }
             }
         }
@@ -1773,7 +2056,7 @@ impl Actor {
                     }
                     Some(Owner::Turn(tid)) => {
                         if let Some(t) = self.turn.as_mut().filter(|t| t.id == tid) {
-                            if t.marks.first_sent.is_none() {
+                            if t.marks.first_sent.is_none() && self.late_filler != Some(id) {
                                 t.marks.first_sent = Some(Instant::now());
                             }
                             if self.phase != Phase::Ending {
@@ -1840,6 +2123,15 @@ impl Actor {
                     self.phase = Phase::Listening;
                     if !self.user_speaking {
                         self.silence_deadline = Some(Instant::now() + self.s.silence_reprompt);
+                    }
+                }
+                // A short remark made while the agent spoke: answer it now.
+                if self.phase == Phase::Listening && !self.user_speaking && self.turn.is_none() {
+                    if let Some(text) = self.held_remark.take() {
+                        let now = Instant::now();
+                        self.speech_end_at = Some(now);
+                        self.stt_final_at = Some(now);
+                        Box::pin(self.start_turn(text, false)).await;
                     }
                 }
             }
@@ -2008,6 +2300,9 @@ impl Actor {
         if !self.tts_outstanding.is_empty() {
             // Sarvam TTS has no cancel: drop the busy socket, use the spare.
             self.tts_outstanding.clear();
+            self.tts_texts.clear();
+            self.tts_heard.clear();
+            self.tts_deadline = None;
             self.tts_backlog.clear();
             self.learning.clear();
             if let Some(s) = self.tts.take() {
@@ -2124,6 +2419,18 @@ impl Actor {
 
     async fn on_timer(&mut self) {
         let now = Instant::now();
+        if self.late_deadline.is_some_and(|d| now >= d) {
+            self.late_deadline = None;
+            self.play_late_filler().await;
+        }
+        if self.tts_deadline.is_some_and(|d| now >= d) {
+            self.tts_deadline = None;
+            if !self.tts_outstanding.is_empty() {
+                tracing::warn!(call = %self.p.call_id, "tts stalled; retrying");
+                self.retry_tts().await;
+                return;
+            }
+        }
         if self.hard_deadline.is_some_and(|d| now >= d) {
             self.hangup("ending_timeout").await;
             return;
@@ -2144,6 +2451,14 @@ impl Actor {
                 && !self.user_speaking
                 && self.turn.is_none()
                 && !self.pending_user.is_empty();
+            if ready && is_fragment(&self.pending_user) {
+                // "I..." and nothing more: not worth a "sorry, say again?".
+                tracing::info!(call = %self.p.call_id, "lone fragment ignored");
+                self.pending_user.clear();
+                self.drop_unused_audio();
+                self.silence_deadline = Some(now + self.s.silence_reprompt);
+                return;
+            }
             if ready {
                 let text = std::mem::take(&mut self.pending_user);
                 // Latency counts from the end of the deliberate wait.
@@ -2204,6 +2519,20 @@ impl Actor {
                 self.stt_billed += billed;
             }
         }
+        // Every reply stream, including cancelled and hedged ones, has
+        // recorded its usage by now (or within the grace period).
+        self.llm.settle(Duration::from_secs(3)).await;
+        let meter = self.llm.report();
+        for (model, usage) in meter.total() {
+            self.add_llm_usage(&model, usage);
+        }
+        if meter.estimated_streams > 0 {
+            tracing::info!(
+                streams = meter.estimated_streams,
+                "LLM usage estimated for replies cut short"
+            );
+        }
+        self.outcome.llm_estimated = meter.estimated;
         let streamed = self.stt_bytes as f64 / (FRAME_SAMPLES as f64 * 50.0);
         // A language switch replaces the session, and a replaced session
         // never reports its billed seconds, so never count less than was sent.
@@ -2289,6 +2618,22 @@ fn tagged(tone: Option<Tone>, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_clear_speech_interrupts_the_agent() {
+        // Too short, or only "yeah" / "hmm": keep talking.
+        assert!(!interrupts(Some("can you tell me"), 300, 500, 2000));
+        assert!(!interrupts(Some("yeah okay"), 3000, 500, 2000));
+        assert!(!interrupts(Some("hmm"), 3000, 500, 2000));
+        // "Wait" / "no" at once.
+        assert!(interrupts(Some("Wait"), 500, 500, 2000));
+        assert!(interrupts(Some("ಬೇಡ"), 500, 500, 2000));
+        // Anything else only after two seconds of clear speech.
+        assert!(!interrupts(Some("can you tell me"), 1500, 500, 2000));
+        assert!(!interrupts(None, 1500, 500, 2000));
+        assert!(interrupts(Some("can you tell me"), 2000, 500, 2000));
+        assert!(interrupts(None, 2000, 500, 2000));
+    }
 
     #[test]
     fn reply_script_picks_the_language() {

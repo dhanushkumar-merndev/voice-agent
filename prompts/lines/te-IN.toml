@@ -1,6 +1,6 @@
 # Telugu fixed lines (gender-neutral). Have a native speaker review before production.
-disclosure = "నమస్కారం, ఇది ఒక AI అసిస్టెంట్ కాల్, ఈ కాల్ రికార్డ్ చేయబడుతోంది."
-default_greeting = "నేను {name} గారితో మాట్లాడుతున్నానా?"
+disclosure = "ఇది ఒక AI అసిస్టెంట్, ఈ కాల్ రికార్డ్ చేయబడుతోంది."
+default_greeting = "నమస్కారం, నేను {name} గారితో మాట్లాడుతున్నానా?"
 reprompt = "మీరు లైన్‌లో ఉన్నారా?"
 silence_goodbye = "మీ మాట వినిపించడం లేదు, అందుకే ఈ కాల్ ముగిస్తున్నాను. ధన్యవాదాలు!"
 goodbye = "మీ సమయానికి ధన్యవాదాలు. నమస్కారం!"

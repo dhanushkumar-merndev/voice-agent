@@ -3,17 +3,18 @@
 # Audition voices before production: https://docs.sarvam.ai/api/api-guides-tutorials/text-to-speech/voices
 # A per-call `voice` field replaces the speaker but keeps the language's model.
 #
-# Tones: the LLM tags each reply neutral, happy or serious. `speaker` is the
-# neutral voice (every call starts with it). `tones.happy` / `tones.serious`
-# may name another speaker of the same model and a pace; a tone left out
-# keeps the speaker and only changes the pace (happy 1.05x, serious 0.95x).
+# Tones: the LLM tags each reply neutral or serious ([happy] was dropped on
+# 2026-10-29 as over the top and now plays as neutral). `speaker` is the
+# neutral voice (every call starts with it). `tones.serious` may name another
+# speaker of the same model and a pace; left out, it keeps the speaker and
+# slows the pace to 0.95x.
 # A per-call `voice` other than the language's own speaker keeps that speaker.
 
 fallback_language = "en-IN"
 
 # Picked by ear on 2026-10-29 from test/output/tts (scripts/tts_samples.py).
-# None of these speakers has a happy/serious style we auditioned, so tones
-# only change the pace.
+# None of these speakers has a serious style we auditioned, so the serious
+# tone only changes the pace.
 # `name`: the agent's name while a voice that doesn't fit the persona's
 # name speaks (male voices; personas are named Priya). `intro` is played
 # once, in that language, the moment the call switches to the voice; the

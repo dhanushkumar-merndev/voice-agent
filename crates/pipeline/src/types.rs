@@ -99,12 +99,19 @@ pub struct PipelineSettings {
     pub vad_threshold: f32,
     /// Caller speech needed to interrupt the agent.
     pub barge_in_min: Duration,
+    /// Speech probability that counts towards an interruption.
+    pub barge_in_threshold: f32,
+    /// Clear caller speech that interrupts the agent.
+    pub barge_in_talk: Duration,
     /// Start the LLM on a stable partial transcript.
     pub eager_llm: bool,
     /// Caller silence before a re-prompt.
     pub silence_reprompt: Duration,
     /// Extra wait before answering a caller who said only "yes" or "hmm".
     pub ack_wait: Duration,
+    /// Play a cached "one sec" if the reply has not started this long after
+    /// the caller stopped talking (zero = off).
+    pub late_reply: Duration,
     /// Per-turn spoken character cap.
     pub max_spoken_chars_per_turn: usize,
     /// Per-turn sentence cap (0 = none).
@@ -281,8 +288,11 @@ pub struct CallOutcome {
     pub stt_seconds: f64,
     /// TTS characters by model.
     pub tts_chars: HashMap<String, u64>,
-    /// LLM token usage by model.
+    /// LLM token usage by model (reported plus estimated).
     pub llm_usage: HashMap<String, TokenUsage>,
+    /// The part of `llm_usage` that was estimated: streams dropped before
+    /// the provider reported their usage (barge-in, hedging, guardrails).
+    pub llm_estimated: HashMap<String, TokenUsage>,
     /// Why the call ended.
     pub end_reason: String,
     /// Stream start → first greeting audio sent.

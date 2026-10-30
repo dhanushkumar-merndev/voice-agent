@@ -10,7 +10,10 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
-use common::{ids::CallId, AppError, ErrorCode};
+use common::{
+    ids::{CallId, DEFAULT_TENANT},
+    AppError, ErrorCode,
+};
 use pipeline::CallCommand;
 use serde_json::{json, Value};
 
@@ -19,6 +22,7 @@ use crate::{
     services::{
         calls::{self, CreateCall},
         idempotency::{self, Begin},
+        training::{self, Feedback},
         util::{percentile, sha256_hex},
     },
     state::AppState,
@@ -109,6 +113,11 @@ struct CallRow {
     telephony_cost_inr: Option<f64>,
     telephony_billed_secs: Option<i32>,
     telephony_rate_inr_per_min: Option<f64>,
+    agent_id: Option<uuid::Uuid>,
+    collect_fields: Value,
+    review: Option<Value>,
+    rating: Option<i16>,
+    rating_note: Option<String>,
 }
 
 /// Rounds ₹ to paise precision for display.
@@ -136,7 +145,14 @@ fn cost_json(call: &CallRow, gst_percent: f64) -> Value {
             "stt": inr(part("stt")),
             "tts": inr(part("tts")),
             "llm": inr(part("llm")),
+            // Part of `llm`: replies cut short (barge-in, hedging) whose
+            // usage the provider never reported, estimated from their size.
+            "llm_estimated": inr(part("llm_estimated")),
+            // Greeting audio synthesized for this call (not yet cached).
+            "tts_greeting": inr(part("tts_greeting")),
             "extraction": inr(part("extraction")),
+            // Post-call review that suggests lessons.
+            "review": inr(part("review")),
             // Post-call batch STT of the caller's turns.
             "stt_retranscribe": inr(part("stt_retranscribe")),
             "total": inr(call.cost_inr),
@@ -201,6 +217,14 @@ pub async fn get_call(
         .await
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::not_found("call not found"))?;
+    let lessons: Vec<training::Lesson> = sqlx::query_as(
+        "SELECT id, agent_id, call_id, lesson, mistake, source, status, created_at, decided_at \
+         FROM agent_lessons WHERE call_id = $1 ORDER BY created_at",
+    )
+    .bind(id.0)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::from)?;
     let turns: Vec<TurnRow> = sqlx::query_as(
         "SELECT seq, role, text, live_text, language, interrupted, started_at FROM call_turns WHERE call_id = $1 ORDER BY seq",
     )
@@ -232,6 +256,15 @@ pub async fn get_call(
     .await
     .map_err(AppError::from)?;
 
+    let agent_name: Option<(String,)> = match call.agent_id {
+        Some(a) => sqlx::query_as("SELECT name FROM agents WHERE id = $1")
+            .bind(a)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(AppError::from)?,
+        None => None,
+    };
+    let agent_name = agent_name.map(|(n,)| n);
     let recording_url = match &call.recording_key {
         Some(key) => match state
             .storage
@@ -252,6 +285,10 @@ pub async fn get_call(
         "status": call.status,
         "to": call.to_number,
         "lead_name": call.lead_name,
+        "agent_id": call.agent_id,
+        "agent_name": agent_name,
+        // The agent's fields at call time; values land in extracted_fields.custom.
+        "collect_fields": call.collect_fields,
         "knowledge_base_id": call.kb_id,
         "language": call.language,
         "detected_language": call.detected_language,
@@ -296,6 +333,117 @@ pub async fn get_call(
         },
         "cost": cost_json(&call, state.assets.pricing.telephony.gst_percent),
         "cost_inr": inr(call.cost_inr + call.telephony_cost_inr.unwrap_or(0.0)),
+        // What the reviewer thought, and the lessons it suggested.
+        "review": call.review,
+        "lessons": lessons,
+        "rating": call.rating,
+        "rating_note": call.rating_note,
+    })))
+}
+
+/// Query for [`list_calls`].
+#[derive(Debug, serde::Deserialize)]
+pub struct ListQuery {
+    /// Page size, 1-200 (default 50).
+    limit: Option<i64>,
+    /// Rows to skip.
+    offset: Option<i64>,
+    /// Only calls with this status.
+    status: Option<String>,
+    /// Only calls placed with this agent.
+    agent_id: Option<uuid::Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ListRow {
+    id: uuid::Uuid,
+    status: String,
+    to_number: String,
+    lead_name: String,
+    language: String,
+    detected_language: Option<String>,
+    created_at: DateTime<Utc>,
+    answered_at: Option<DateTime<Utc>>,
+    ended_at: Option<DateTime<Utc>>,
+    duration_secs: Option<i32>,
+    end_reason: Option<String>,
+    cost_inr: f64,
+    telephony_cost_inr: Option<f64>,
+    interest_level: Option<String>,
+    summary: Option<String>,
+    appointments: i64,
+    v2v_p50: Option<f64>,
+    agent_id: Option<uuid::Uuid>,
+    agent_name: Option<String>,
+    review_score: Option<i16>,
+    rating: Option<i16>,
+    total: i64,
+}
+
+/// `GET /v1/calls?limit=&offset=&status=`: newest calls first, with phone
+/// numbers masked to the last 4 digits.
+pub async fn list_calls(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ListQuery>,
+) -> ApiResult<Json<Value>> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let rows: Vec<ListRow> = sqlx::query_as(
+        "SELECT c.id, c.status, c.to_number, c.lead_name, c.language, c.detected_language, \
+           c.created_at, c.answered_at, c.ended_at, c.duration_secs, c.end_reason, c.cost_inr, \
+           c.telephony_cost_inr, c.extracted_fields->>'interest_level' AS interest_level, \
+           c.extracted_fields->>'summary' AS summary, \
+           (SELECT count(*) FROM appointments a WHERE a.call_id = c.id) AS appointments, \
+           (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY l.first_audio_sent_ms) \
+              FROM turn_latency l WHERE l.call_id = c.id) AS v2v_p50, \
+           c.agent_id, g.name AS agent_name, c.review_score, c.rating, count(*) OVER () AS total \
+         FROM calls c LEFT JOIN agents g ON g.id = c.agent_id \
+         WHERE c.tenant_id = $1 AND ($2::text IS NULL OR c.status = $2) \
+           AND ($5::uuid IS NULL OR c.agent_id = $5) \
+         ORDER BY c.created_at DESC LIMIT $3 OFFSET $4",
+    )
+    .bind(common::ids::DEFAULT_TENANT.0)
+    .bind(q.status.as_deref())
+    .bind(limit)
+    .bind(offset)
+    .bind(q.agent_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::from)?;
+    let gst = 1.0 + state.assets.pricing.telephony.gst_percent / 100.0;
+    let total = rows.first().map_or(0, |r| r.total);
+    Ok(Json(json!({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "calls": rows.iter().map(|r| {
+            let excl = r.cost_inr + r.telephony_cost_inr.unwrap_or(0.0);
+            json!({
+                "call_id": r.id,
+                "status": r.status,
+                "to": common::mask::mask_phone(&r.to_number),
+                "lead_name": r.lead_name,
+                "agent_id": r.agent_id,
+                "agent_name": r.agent_name,
+                "language": r.language,
+                "detected_language": r.detected_language,
+                "created_at": r.created_at,
+                "answered_at": r.answered_at,
+                "ended_at": r.ended_at,
+                "duration_secs": r.duration_secs,
+                "end_reason": r.end_reason,
+                "in_progress": state.calls.get(CallId(r.id)).is_some(),
+                "interest_level": r.interest_level,
+                "summary": r.summary,
+                "appointments": r.appointments,
+                "voice_to_voice_p50_ms": r.v2v_p50.map(|v| v.round() as i64),
+                "review_score": r.review_score,
+                "rating": r.rating,
+                "cost_excl_gst": inr(excl),
+                "cost_incl_gst": inr(excl * gst),
+                "telephony_pending": r.telephony_cost_inr.is_none() && r.ended_at.is_some() && r.answered_at.is_some(),
+            })
+        }).collect::<Vec<_>>(),
     })))
 }
 
@@ -316,6 +464,8 @@ struct CostTotals {
     llm: f64,
     extraction: f64,
     stt_retranscribe: f64,
+    review: f64,
+    tts_greeting: f64,
     ai: f64,
     telephony: f64,
     telephony_pending: i64,
@@ -343,6 +493,8 @@ pub async fn cost_summary(
            COALESCE(sum((cost_breakdown->>'llm')::float8), 0) AS llm, \
            COALESCE(sum((cost_breakdown->>'extraction')::float8), 0) AS extraction, \
            COALESCE(sum((cost_breakdown->>'stt_retranscribe')::float8), 0) AS stt_retranscribe, \
+           COALESCE(sum((cost_breakdown->>'review')::float8), 0) AS review, \
+           COALESCE(sum((cost_breakdown->>'tts_greeting')::float8), 0) AS tts_greeting, \
            COALESCE(sum(cost_inr), 0) AS ai, \
            COALESCE(sum(telephony_cost_inr), 0) AS telephony, \
            count(*) FILTER (WHERE answered_at IS NOT NULL AND telephony_cost_inr IS NULL) AS telephony_pending \
@@ -356,9 +508,16 @@ pub async fn cost_summary(
     .await
     .map_err(AppError::from)?;
 
+    let other = super::stats::off_call_spend(
+        &state,
+        "created_at >= ($2::date)::timestamp AT TIME ZONE 'Asia/Kolkata' \
+         AND created_at < (($2::date) + interval '1 month') AT TIME ZONE 'Asia/Kolkata'",
+        first,
+    )
+    .await?;
     let rates = &state.assets.pricing.telephony;
     let rental = rates.number_rental_inr_per_month;
-    let total = t.ai + t.telephony + rental;
+    let total = t.ai + t.telephony + rental + other.total;
     let gst = rates.gst_percent;
     let per_call = |v: f64| (t.answered > 0).then(|| inr(v / t.answered as f64));
     Ok(Json(json!({
@@ -373,8 +532,11 @@ pub async fn cost_summary(
             "llm": inr(t.llm),
             "extraction": inr(t.extraction),
             "stt_retranscribe": inr(t.stt_retranscribe),
+            "review": inr(t.review),
+            "tts_greeting": inr(t.tts_greeting),
             "total": inr(t.ai),
         },
+        "other": other.json(),
         "telephony": {
             "calls": inr(t.telephony),
             "calls_waiting_for_plivo_cost": t.telephony_pending,
@@ -437,4 +599,53 @@ pub async fn hangup_call(
             format!("call is not active (status: {status})"),
         ))),
     }
+}
+
+/// `POST /v1/calls/{id}/feedback`: a person rates the call (1 or -1) with an
+/// optional note. A bad rating or a note is reviewed again in the
+/// background so the note becomes a suggested lesson for the agent.
+pub async fn call_feedback(
+    State(state): State<AppState>,
+    Path(id): Path<CallId>,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let feedback: Feedback = parse_body(&body)?;
+    if state.calls.get(id).is_some() {
+        return Err(ApiError(AppError::new(
+            ErrorCode::Conflict,
+            "the call is still going; rate it after it ends",
+        )));
+    }
+    training::save_feedback(&state, DEFAULT_TENANT, id, &feedback).await?;
+    let reviewing = feedback.rating < 0 || !feedback.note.trim().is_empty();
+    if reviewing {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = training::review(&state, DEFAULT_TENANT, id, Some(&feedback)).await {
+                tracing::warn!(call = %id, error = %e, "review with feedback failed");
+            }
+        });
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "status": "saved", "reviewing": reviewing })),
+    )
+        .into_response())
+}
+
+/// `POST /v1/calls/{id}/review`: reviews a finished call again now and
+/// returns the score, mistakes and suggested lessons.
+pub async fn review_call(
+    State(state): State<AppState>,
+    Path(id): Path<CallId>,
+) -> ApiResult<Json<training::Review>> {
+    if state.calls.get(id).is_some() {
+        return Err(ApiError(AppError::new(
+            ErrorCode::Conflict,
+            "the call is still going; review it after it ends",
+        )));
+    }
+    Ok(Json(
+        training::review(&state, DEFAULT_TENANT, id, None).await?,
+    ))
 }

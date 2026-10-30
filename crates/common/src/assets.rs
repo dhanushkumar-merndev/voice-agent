@@ -53,6 +53,9 @@ pub struct Assets {
     /// Reusable personas from `prompts/personas/<name>.txt`: who the agent
     /// is and what the call is for. Picked per call with `persona`.
     pub personas: HashMap<String, String>,
+    /// `prompts/train.md` (optional): lessons from past calls that apply to
+    /// every agent, added after the agent's own instructions.
+    pub train: String,
     /// Fixed lines by language code.
     lines: HashMap<String, FixedLines>,
     /// Language → voice mapping.
@@ -175,9 +178,17 @@ impl Assets {
             BookingRules::default()
         };
 
+        let train_path = prompts_dir.join("train.md");
+        let train = if train_path.exists() {
+            read(&train_path)?.trim().to_owned()
+        } else {
+            String::new()
+        };
+
         Ok(Self {
             speaking_rules,
             personas,
+            train,
             lines,
             voices,
             pricing,
@@ -320,8 +331,9 @@ impl Tone {
     /// Parses a reply tag's word ("happy"), ignoring case and spaces.
     pub fn from_tag(tag: &str) -> Option<Self> {
         match tag.trim().to_ascii_lowercase().as_str() {
-            "neutral" => Some(Self::Neutral),
-            "happy" => Some(Self::Happy),
+            // The upbeat voice sounded over the top on calls: an old
+            // [happy] habit plays as neutral.
+            "neutral" | "happy" => Some(Self::Neutral),
             "serious" => Some(Self::Serious),
             _ => None,
         }

@@ -1,6 +1,6 @@
 # Hindi fixed lines. Phrased gender-neutrally so they fit male and female voices.
-disclosure = "नमस्ते, यह एक AI सहायक की कॉल है, और यह कॉल रिकॉर्ड की जा रही है।"
-default_greeting = "क्या मेरी बात {name} जी से हो रही है?"
+disclosure = "यह एक AI सहायक है, और यह कॉल रिकॉर्ड की जा रही है।"
+default_greeting = "नमस्ते, क्या मेरी बात {name} जी से हो रही है?"
 reprompt = "क्या आप लाइन पर हैं?"
 silence_goodbye = "आपकी आवाज़ नहीं आ रही है, इसलिए यह कॉल अभी समाप्त की जा रही है। धन्यवाद!"
 goodbye = "आपके समय के लिए धन्यवाद। नमस्ते!"

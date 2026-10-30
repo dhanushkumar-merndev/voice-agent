@@ -1,6 +1,6 @@
 # Kannada fixed lines (gender-neutral). Have a native speaker review before production.
-disclosure = "ನಮಸ್ಕಾರ, ಇದು ಒಂದು AI ಸಹಾಯಕರ ಕರೆ, ಮತ್ತು ಈ ಕರೆಯನ್ನು ರೆಕಾರ್ಡ್ ಮಾಡಲಾಗುತ್ತಿದೆ."
-default_greeting = "ನಾನು {name} ಅವರೊಂದಿಗೆ ಮಾತನಾಡುತ್ತಿದ್ದೇನೆಯೇ?"
+disclosure = "ಇದು ಒಂದು AI ಸಹಾಯಕ, ಮತ್ತು ಈ ಕರೆಯನ್ನು ರೆಕಾರ್ಡ್ ಮಾಡಲಾಗುತ್ತಿದೆ."
+default_greeting = "ನಮಸ್ಕಾರ, ನಾನು {name} ಅವರೊಂದಿಗೆ ಮಾತನಾಡುತ್ತಿದ್ದೇನೆಯೇ?"
 reprompt = "ನೀವು ಲೈನ್‌ನಲ್ಲಿ ಇದ್ದೀರಾ?"
 silence_goodbye = "ನಿಮ್ಮ ಧ್ವನಿ ಕೇಳಿಸುತ್ತಿಲ್ಲ, ಆದ್ದರಿಂದ ಈ ಕರೆಯನ್ನು ಮುಗಿಸುತ್ತಿದ್ದೇನೆ. ಧನ್ಯವಾದಗಳು!"
 goodbye = "ನಿಮ್ಮ ಸಮಯಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ನಮಸ್ಕಾರ!"

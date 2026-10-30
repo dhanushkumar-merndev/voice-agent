@@ -252,8 +252,11 @@ pub struct LlmConfig {
     pub hedge_ms: u64,
     /// `LLM_MAX_TOKENS_LIVE`.
     pub max_tokens_live: u32,
-    /// `EXTRACT_LLM_MODEL`, used for post-call extraction.
+    /// `EXTRACT_LLM_MODEL`, used for post-call extraction and review.
     pub extract_model: String,
+    /// `REVIEW_CALLS`: after each call, score it and suggest lessons for
+    /// the agent's training notes.
+    pub review_calls: bool,
 }
 
 impl LlmConfig {
@@ -291,6 +294,13 @@ pub struct PipelineConfig {
     pub vad_threshold: f32,
     /// `BARGE_IN_MIN_MS`: caller speech needed to interrupt the agent.
     pub barge_in_min_ms: u32,
+    /// `BARGE_IN_VAD_THRESHOLD`: speech probability that counts towards an
+    /// interruption, stricter than `VAD_THRESHOLD` so background voices and
+    /// line noise don't stop the agent.
+    pub barge_in_vad_threshold: f32,
+    /// `BARGE_IN_TALK_MS`: clear caller speech that interrupts the agent
+    /// (a "wait" or "no" interrupts after `BARGE_IN_MIN_MS`).
+    pub barge_in_talk_ms: u32,
     /// `EAGER_LLM`: start the LLM on a stable partial transcript.
     pub eager_llm: bool,
     /// `SILENCE_REPROMPT_SECS`: caller silence before a re-prompt.
@@ -299,6 +309,10 @@ pub struct PipelineConfig {
     /// "yes", "so" or "hmm", which often comes before the real answer
     /// (0 = answer at once).
     pub ack_wait_ms: u32,
+    /// `LATE_REPLY_MS`: when the reply has not started this long after the
+    /// caller stopped talking, a short cached "one sec" plays so the line is
+    /// never silent for long (0 = off).
+    pub late_reply_ms: u32,
     /// `DEFAULT_MAX_DURATION_SECS`: call length cap when the request omits it.
     pub default_max_duration_secs: u32,
     /// `MAX_SPOKEN_CHARS_PER_TURN`.
@@ -441,19 +455,23 @@ impl Config {
                 fallback_path: env.string_or("LLM_FALLBACK_PATH", "/v2/chat/completions"),
                 first_token_timeout_ms: env.parse_or("LLM_FIRST_TOKEN_TIMEOUT_MS", 1500),
                 hedge_ms: env.parse_or("LLM_HEDGE_MS", 600),
-                max_tokens_live: env.parse_or("LLM_MAX_TOKENS_LIVE", 80),
+                max_tokens_live: env.parse_or("LLM_MAX_TOKENS_LIVE", 200),
                 extract_model: env.string_or("EXTRACT_LLM_MODEL", "sarvam-105b"),
+                review_calls: env.parse_or("REVIEW_CALLS", true),
             },
             pipeline: PipelineConfig {
                 default_language: env.string_or("DEFAULT_LANGUAGE", "auto"),
                 vad_silence_ms: env.parse_or("VAD_SILENCE_MS", 450),
                 vad_threshold: env.parse_or("VAD_THRESHOLD", 0.5),
-                barge_in_min_ms: env.parse_or("BARGE_IN_MIN_MS", 300),
+                barge_in_min_ms: env.parse_or("BARGE_IN_MIN_MS", 500),
+                barge_in_vad_threshold: env.parse_or("BARGE_IN_VAD_THRESHOLD", 0.7),
+                barge_in_talk_ms: env.parse_or("BARGE_IN_TALK_MS", 2000),
                 eager_llm: env.flag_or("EAGER_LLM", false),
-                silence_reprompt_secs: env.parse_or("SILENCE_REPROMPT_SECS", 7),
+                silence_reprompt_secs: env.parse_or("SILENCE_REPROMPT_SECS", 5),
                 ack_wait_ms: env.parse_or("ACK_WAIT_MS", 2000),
+                late_reply_ms: env.parse_or("LATE_REPLY_MS", 2000),
                 default_max_duration_secs: env.parse_or("DEFAULT_MAX_DURATION_SECS", 300),
-                max_spoken_chars_per_turn: env.parse_or("MAX_SPOKEN_CHARS_PER_TURN", 160),
+                max_spoken_chars_per_turn: env.parse_or("MAX_SPOKEN_CHARS_PER_TURN", 220),
                 max_sentences_per_turn: env.parse_or("MAX_SENTENCES_PER_TURN", 3),
                 billing_pulse_secs: env.parse_or("TELEPHONY_BILLING_PULSE_SECS", 30),
                 pulse_wrap_up_secs: env.parse_or("PULSE_WRAP_UP_SECS", 5),
@@ -517,11 +535,20 @@ impl Config {
         if p.vad_threshold.is_nan() || p.vad_threshold <= 0.0 || p.vad_threshold >= 1.0 {
             problems.push("VAD_THRESHOLD must be between 0 and 1 (exclusive)".to_owned());
         }
+        if p.barge_in_vad_threshold.is_nan()
+            || p.barge_in_vad_threshold <= 0.0
+            || p.barge_in_vad_threshold >= 1.0
+        {
+            problems.push("BARGE_IN_VAD_THRESHOLD must be between 0 and 1 (exclusive)".to_owned());
+        }
         if !(100..=3000).contains(&p.vad_silence_ms) {
             problems.push("VAD_SILENCE_MS must be between 100 and 3000".to_owned());
         }
         if p.ack_wait_ms > 6000 {
             problems.push("ACK_WAIT_MS must be at most 6000".to_owned());
+        }
+        if p.late_reply_ms > 10_000 {
+            problems.push("LATE_REPLY_MS must be at most 10000".to_owned());
         }
         if !(40..=2000).contains(&p.playout_lead_ms) {
             problems.push("PLAYOUT_LEAD_MS must be between 40 and 2000".to_owned());
@@ -689,8 +716,11 @@ mod tests {
         assert_eq!(cfg.pipeline.vad_silence_ms, 450);
         assert_eq!(cfg.pipeline.playout_lead_ms, 400);
         assert_eq!(cfg.llm.hedge_ms, 600);
-        assert_eq!(cfg.llm.max_tokens_live, 80);
-        assert_eq!(cfg.pipeline.max_spoken_chars_per_turn, 160);
+        assert_eq!(cfg.llm.max_tokens_live, 200);
+        assert_eq!(cfg.pipeline.max_spoken_chars_per_turn, 220);
+        assert_eq!(cfg.pipeline.barge_in_talk_ms, 2000);
+        assert_eq!(cfg.pipeline.ack_wait_ms, 2000);
+        assert_eq!(cfg.pipeline.late_reply_ms, 2000);
         assert_eq!(cfg.pipeline.max_sentences_per_turn, 3);
         assert_eq!(cfg.sarvam.stt_model, "saaras:v4");
         assert_eq!(cfg.sarvam.tts_codec, TtsCodec::Wav);

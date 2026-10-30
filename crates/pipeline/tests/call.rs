@@ -86,9 +86,12 @@ fn settings() -> PipelineSettings {
         vad_silence: Duration::from_millis(400),
         vad_threshold: 0.5,
         barge_in_min: Duration::from_millis(120),
+        barge_in_threshold: 0.5,
+        barge_in_talk: Duration::from_millis(300),
         eager_llm: false,
         silence_reprompt: Duration::from_secs(30),
         ack_wait: Duration::ZERO,
+        late_reply: Duration::ZERO,
         max_spoken_chars_per_turn: 250,
         max_sentences_per_turn: 0,
         max_tts_chars_per_call: 4000,
@@ -358,7 +361,10 @@ async fn barge_in_clears_audio_and_keeps_only_played_text() {
         FakeReply::Text(long),
         FakeReply::Text("It starts at ten thousand a month.".into()),
     ]);
-    let h = start(params(), settings(), stt, llm);
+    // Interrupt quickly, while the long answer is still being synthesized.
+    let mut s = settings();
+    s.barge_in_talk = Duration::from_millis(120);
+    let h = start(params(), s, stt, llm);
     h.begin().await;
     h.silence_until(Duration::from_secs(3), |h| !h.spoken().is_empty())
         .await;
@@ -825,7 +831,8 @@ async fn tone_tags_change_the_voice_and_are_not_spoken() {
             .find(|(s, _)| s.contains(needle))
             .map(|(_, p)| *p)
     };
-    assert!(pace_of("Lovely").unwrap() > 1.0, "{paces:?}");
+    // [happy] plays as neutral (the upbeat voice sounded over the top).
+    assert!((pace_of("Lovely").unwrap() - 1.0).abs() < 1e-6, "{paces:?}");
     assert!(pace_of("can't help").unwrap() < 1.0, "{paces:?}");
     h.audio(false, 600).await;
     h.hangup_and_wait().await;
@@ -910,7 +917,7 @@ async fn eager_mode_still_answers_with_the_final_transcript() {
     assert!(outcome.turns.iter().any(|t| t.text == "what does it cost"));
 }
 
-const DISCLOSURE: &str = "Hi, I'm an AI assistant, and this call is recorded.";
+const DISCLOSURE: &str = "This is an AI assistant, and this call is recorded.";
 const BODY: &str = "This is Priya from Star Smile Dental. Shall we book your check-up?";
 
 /// A greeting in two cached clips: the disclosure, then the body.
@@ -1011,7 +1018,7 @@ async fn slow_tools_play_the_checking_line_once_before_the_reply() {
         .await
     );
     let spoken = h.spoken();
-    let checking = |s: &&String| s.as_str() == "Hmm, one moment, let me check.";
+    let checking = |s: &&String| s.as_str() == "One moment, let me check.";
     assert_eq!(spoken.iter().filter(checking).count(), 1, "{spoken:?}");
     let at = |p: &dyn Fn(&String) -> bool| spoken.iter().position(p).unwrap();
     assert!(
@@ -1152,4 +1159,232 @@ async fn the_checking_filler_changes_between_tool_calls() {
     let spoken = h.spoken();
     let used: Vec<&String> = spoken.iter().filter(|s| fillers.contains(s)).collect();
     assert_eq!(used, [&fillers[0], &fillers[1]], "{spoken:?}");
+}
+
+#[tokio::test]
+async fn speech_is_resent_when_tts_fails_or_stalls() {
+    for (fail, stall) in [(2, 0), (0, 1)] {
+        let stt = FakeStt::with_script(&["Which day is free"]);
+        let llm = FakeLlm::with_script(vec![FakeReply::Text("Friday is free.".into())]);
+        let tts = FakeTts {
+            chunk_delay: Duration::from_millis(10),
+            ..FakeTts::default()
+        };
+        let h = start_with_tts(
+            params(),
+            settings(),
+            stt,
+            llm,
+            tts.clone(),
+            Arc::new(NoLines),
+        );
+        h.begin().await;
+        h.audio(false, 2500).await; // greeting plays out
+                                    // The reply's first attempts fail (socket closed) or hang.
+        tts.fail_speaks.store(fail, Ordering::SeqCst);
+        tts.stall_speaks.store(stall, Ordering::SeqCst);
+        h.audio(true, 500).await;
+        assert!(
+            h.silence_until(Duration::from_secs(8), |h| {
+                h.spoken().iter().any(|s| s.contains("Friday is free"))
+            })
+            .await,
+            "reply never spoken (fail {fail}, stall {stall}): {:?}",
+            h.spoken()
+        );
+        let (outcome, _) = h.hangup_and_wait().await;
+        assert!(
+            outcome
+                .turns
+                .iter()
+                .any(|t| t.role == Speaker::Assistant && t.text.contains("Friday is free")),
+            "{:#?}",
+            outcome.turns
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_late_reply_gets_a_cached_filler_first_and_a_fast_one_does_not() {
+    for slow in [true, false] {
+        let stt = FakeStt::with_script(&["Tell me about the plots"]);
+        let mut llm = FakeLlm::with_script(vec![FakeReply::Text("There are forty plots.".into())]);
+        if slow {
+            llm.first_token_delay = Duration::from_millis(1500);
+        }
+        let mut s = settings();
+        // Speech end is detected 400 ms after the caller stops (vad_silence).
+        s.late_reply = Duration::from_millis(900);
+        s.llm_first_token_timeout = Duration::from_secs(3);
+        let filler = assets().lines("en-IN").checking[0].clone();
+        let lines = MemoryLines::default();
+        // 200 ms of a byte the fake TTS never produces.
+        lines
+            .0
+            .lock()
+            .unwrap()
+            .insert(filler.clone(), Bytes::from(vec![0x42u8; 1600]));
+        let tts = FakeTts {
+            chunk_delay: Duration::from_millis(10),
+            ..FakeTts::default()
+        };
+        let h = start_with_tts(params(), s, stt, llm, tts, Arc::new(lines));
+        h.begin().await;
+        h.audio(false, 2500).await;
+        h.audio(true, 500).await;
+        assert!(
+            h.silence_until(Duration::from_secs(4), |h| {
+                h.spoken().iter().any(|s| s.contains("forty plots"))
+            })
+            .await
+        );
+        h.audio(false, 600).await;
+        let filler_played = h
+            .out
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| matches!(m, MediaOut::Play(f) if f.iter().all(|&b| b == 0x42)));
+        assert_eq!(filler_played, slow, "slow={slow}");
+        let (outcome, _) = h.hangup_and_wait().await;
+        let reply = outcome
+            .turns
+            .iter()
+            .find(|t| t.role == Speaker::Assistant && t.text.contains("forty plots"))
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        assert_eq!(reply.starts_with(&filler), slow, "{reply}");
+        // The filler does not count as the reply's first audio.
+        let v2v = outcome.latencies.last().and_then(|l| l.first_audio_sent_ms);
+        assert_eq!(v2v.is_some_and(|ms| ms >= 1500), slow, "{v2v:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_short_remark_over_the_agent_is_answered_after_it() {
+    let stt = FakeStt::with_script(&["Tell me about the plots", "how much is it"]);
+    let long = "Star Garden has forty six plots on ten acres of coffee. ".repeat(3);
+    let llm = FakeLlm::with_script(vec![
+        FakeReply::Text(long),
+        FakeReply::Text("Prices are shared on WhatsApp.".into()),
+    ]);
+    let mut s = settings();
+    s.barge_in_talk = Duration::from_millis(2000);
+    let h = start(params(), s, stt, llm);
+    h.begin().await;
+    h.audio(false, 2500).await;
+    h.audio(true, 500).await;
+    assert!(
+        h.silence_until(Duration::from_secs(3), |h| h.spoken().len() >= 2)
+            .await
+    );
+    h.audio(false, 200).await; // the agent is speaking
+    h.audio(true, 500).await; // a short remark, well under 2 s
+    assert!(!h.cleared(), "a short remark cut the agent off");
+    assert!(
+        h.silence_until(Duration::from_secs(8), |h| {
+            h.spoken().iter().any(|s| s.contains("WhatsApp"))
+        })
+        .await,
+        "the remark was never answered: {:?}",
+        h.spoken()
+    );
+    let (outcome, h) = h.hangup_and_wait().await;
+    let requests: Vec<String> = h
+        .llm
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, u)| u.clone())
+        .collect();
+    assert_eq!(
+        requests.last().map(String::as_str),
+        Some("how much is it"),
+        "{requests:?}"
+    );
+    // The long reply played to the end (the last one is cut by the hangup).
+    assert!(
+        outcome
+            .turns
+            .iter()
+            .filter(|t| t.text.contains("forty six"))
+            .all(|t| !t.interrupted),
+        "{:#?}",
+        outcome.turns
+    );
+}
+
+#[tokio::test]
+async fn a_lone_fragment_is_ignored() {
+    let stt = FakeStt::with_script(&["I"]);
+    let llm = FakeLlm::with_script(vec![FakeReply::Text(
+        "Sorry, could you say that again?".into(),
+    )]);
+    let h = start(params(), ack_settings(600), stt, llm);
+    h.begin().await;
+    h.audio(false, 2500).await;
+    h.audio(true, 300).await; // "I"
+    h.audio(false, 1500).await; // and nothing more
+    assert!(
+        h.llm.requests.lock().unwrap().is_empty(),
+        "answered a lone \"I\""
+    );
+    let (outcome, _) = h.hangup_and_wait().await;
+    assert!(
+        outcome.turns.iter().all(|t| t.role != Speaker::User),
+        "{:#?}",
+        outcome.turns
+    );
+}
+
+#[tokio::test]
+async fn after_one_switch_the_language_holds_until_three_turns_in_another() {
+    let stt = FakeStt::with_script(&[
+        "[[ta-IN]]எனக்கு நிலம் வேண்டும்",
+        "[[en-IN]]okay tell me more",
+        "[[en-IN]]what about the price",
+        "[[en-IN]]please speak in english",
+    ]);
+    let llm = FakeLlm::with_script(vec![
+        FakeReply::Text("சரி, சொல்லுங்கள்.".into()),
+        FakeReply::Text("ஸ்டார் கார்டனில் நாற்பது மனைகள் உள்ளன.".into()),
+        FakeReply::Text("விலை வாட்ஸ்அப்பில் அனுப்புகிறேன்.".into()),
+        FakeReply::Text("Sure, I will continue in English.".into()),
+    ]);
+    let mut p = params();
+    p.fixed_language = None;
+    let h = start(p, settings(), stt, llm);
+    h.begin().await;
+    h.audio(false, 2500).await;
+    for n in 1..=4 {
+        h.audio(true, 500).await;
+        assert!(
+            h.silence_until(Duration::from_secs(4), |h| h
+                .llm
+                .requests
+                .lock()
+                .unwrap()
+                .len()
+                >= n)
+                .await
+        );
+        h.audio(false, 2500).await;
+    }
+    let (outcome, h) = h.hangup_and_wait().await;
+    let requests: Vec<String> = h
+        .llm
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, u)| u.clone())
+        .collect();
+    // Tamil from the first turn; two English turns are not enough to leave it.
+    for r in &requests[..3] {
+        assert!(r.contains("(Reply in Tamil"), "{requests:#?}");
+    }
+    // The third English turn in a row switches back.
+    assert!(!requests[3].contains("(Reply in"), "{requests:#?}");
+    assert_eq!(outcome.detected_language.as_deref(), Some("en-IN"));
 }

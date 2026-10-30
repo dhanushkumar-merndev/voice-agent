@@ -72,8 +72,16 @@ id_type!(
     CallId
 );
 id_type!(
+    /// A configured agent: character prompt, fields to collect, knowledge base.
+    AgentId
+);
+id_type!(
     /// One turn (utterance) of a call transcript.
     TurnId
+);
+id_type!(
+    /// A lesson an agent learned (or may learn) from a call.
+    LessonId
 );
 
 /// The single tenant used until multi-tenancy lands. Seeded by the first migration.

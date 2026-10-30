@@ -81,6 +81,86 @@ pub async fn create_kb(
     }
 }
 
+/// `GET /v1/knowledge-bases`: every knowledge base with document and chunk counts.
+pub async fn list_kbs(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(uuid::Uuid, String, DateTime<Utc>, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT k.id, k.name, k.created_at, \
+           (SELECT count(*) FROM kb_documents d WHERE d.kb_id = k.id), \
+           (SELECT count(*) FROM kb_documents d WHERE d.kb_id = k.id AND d.status = 'ready'), \
+           (SELECT count(*) FROM kb_chunks c WHERE c.kb_id = k.id), \
+           (SELECT COALESCE(sum(d.size_bytes), 0)::int8 FROM kb_documents d WHERE d.kb_id = k.id) \
+         FROM knowledge_bases k WHERE k.tenant_id = $1 ORDER BY k.created_at DESC",
+    )
+    .bind(DEFAULT_TENANT.0)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(json!({
+        "embedding_model_ready": state.kb.available(),
+        "knowledge_bases": rows.iter().map(|(id, name, created, docs, ready, chunks, bytes)| json!({
+            "id": id, "name": name, "created_at": created, "documents": docs,
+            "ready_documents": ready, "chunks": chunks, "size_bytes": bytes,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// `DELETE /v1/knowledge-bases/{id}`: removes it with its documents, chunks
+/// and stored files. Calls that used it keep their transcripts.
+pub async fn delete_kb(
+    State(state): State<AppState>,
+    Path(kb): Path<KbId>,
+) -> ApiResult<StatusCode> {
+    ensure_kb(&state, kb).await?;
+    let keys: Vec<(Option<String>,)> =
+        sqlx::query_as("SELECT storage_key FROM kb_documents WHERE kb_id = $1")
+            .bind(kb.0)
+            .fetch_all(&state.db)
+            .await
+            .map_err(AppError::from)?;
+    sqlx::query("DELETE FROM knowledge_bases WHERE id = $1 AND tenant_id = $2")
+        .bind(kb.0)
+        .bind(DEFAULT_TENANT.0)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::from)?;
+    for (key,) in keys {
+        remove_file(&state, key.as_deref()).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /v1/knowledge-bases/{id}/documents/{doc}`: removes one document
+/// and its chunks.
+pub async fn delete_document(
+    State(state): State<AppState>,
+    Path((kb, doc)): Path<(KbId, DocumentId)>,
+) -> ApiResult<StatusCode> {
+    let key: Option<(Option<String>,)> = sqlx::query_as(
+        "DELETE FROM kb_documents WHERE id = $1 AND kb_id = $2 AND tenant_id = $3 RETURNING storage_key",
+    )
+    .bind(doc.0)
+    .bind(kb.0)
+    .bind(DEFAULT_TENANT.0)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::from)?;
+    let Some((key,)) = key else {
+        return Err(ApiError(AppError::not_found("document not found")));
+    };
+    remove_file(&state, key.as_deref()).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deletes an uploaded file; a failure only leaves an orphaned object.
+async fn remove_file(state: &AppState, key: Option<&str>) {
+    if let Some(key) = key {
+        if let Err(e) = state.storage.delete(key).await {
+            tracing::warn!(error = %e, "could not delete knowledge base file");
+        }
+    }
+}
+
 async fn ensure_kb(state: &AppState, kb: KbId) -> Result<(), AppError> {
     let row: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT id FROM knowledge_bases WHERE id = $1 AND tenant_id = $2")
@@ -226,6 +306,78 @@ pub async fn list_documents(
             "id": id, "filename": filename, "status": status, "error": error,
             "size_bytes": size, "chunks": chunks, "created_at": created,
         })).collect::<Vec<_>>()
+    })))
+}
+
+/// Largest original file returned inline as `text` by [`get_document`].
+const MAX_INLINE_TEXT_BYTES: i64 = 1024 * 1024;
+
+/// `GET /v1/knowledge-bases/{id}/documents/{doc}`: one document with the
+/// chunks the agent searches, the original text for Markdown and plain-text
+/// files, and a short-lived link to the uploaded file.
+pub async fn get_document(
+    State(state): State<AppState>,
+    Path((kb, doc)): Path<(KbId, DocumentId)>,
+) -> ApiResult<Json<Value>> {
+    #[allow(clippy::type_complexity)]
+    let row: Option<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        "SELECT filename, status, error, content_type, size_bytes, storage_key, created_at \
+         FROM kb_documents WHERE id = $1 AND kb_id = $2 AND tenant_id = $3",
+    )
+    .bind(doc.0)
+    .bind(kb.0)
+    .bind(DEFAULT_TENANT.0)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::from)?;
+    let Some((filename, status, error, content_type, size, key, created)) = row else {
+        return Err(ApiError(AppError::not_found("document not found")));
+    };
+    let chunks: Vec<(i32, String, i32)> = sqlx::query_as(
+        "SELECT seq, content, token_count FROM kb_chunks WHERE document_id = $1 ORDER BY seq",
+    )
+    .bind(doc.0)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::from)?;
+
+    let lower = filename.to_ascii_lowercase();
+    let is_text = lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".txt");
+    let mut text = None;
+    let mut file_url = None;
+    if let Some(key) = key.as_deref() {
+        if is_text && size.is_some_and(|s| s <= MAX_INLINE_TEXT_BYTES) {
+            match state.storage.get(key).await {
+                Ok(bytes) => text = Some(String::from_utf8_lossy(&bytes).into_owned()),
+                Err(e) => tracing::warn!(error = %e, "could not read knowledge base file"),
+            }
+        }
+        match state
+            .storage
+            .presign_get(key, std::time::Duration::from_secs(300))
+            .await
+        {
+            Ok(url) => file_url = Some(url),
+            Err(e) => tracing::warn!(error = %e, "could not sign knowledge base file link"),
+        }
+    }
+    Ok(Json(json!({
+        "id": doc.0, "filename": filename, "status": status, "error": error,
+        "content_type": content_type, "size_bytes": size, "created_at": created,
+        "text": text,
+        "file_url": file_url,
+        "file_url_expires_in_secs": 300,
+        "chunks": chunks.iter().map(|(seq, content, tokens)| json!({
+            "seq": seq, "content": content, "tokens": tokens,
+        })).collect::<Vec<_>>(),
     })))
 }
 

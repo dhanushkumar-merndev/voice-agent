@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
+    agents::{self, LeadField},
     booking::{clean_spoken_name, has_indian_script},
     registry::CallSlot,
     util::percentile,
@@ -37,6 +38,9 @@ pub struct ExtractedFields {
     pub objections: Vec<String>,
     /// Two- or three-sentence summary.
     pub summary: String,
+    /// The agent's own fields (`collect_fields` of the call), by key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<serde_json::Map<String, Value>>,
 }
 
 /// Interest level.
@@ -53,9 +57,9 @@ pub enum InterestLevel {
     None,
 }
 
-fn extraction_schema() -> Value {
+fn extraction_schema(fields: &[LeadField]) -> Value {
     let nullable = |t: &str| json!({ "type": [t, "null"] });
-    json!({
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["name", "interest_level", "budget", "preferred_language", "follow_up_date", "objections", "summary"],
@@ -68,7 +72,14 @@ fn extraction_schema() -> Value {
             "objections": { "type": "array", "items": { "type": "string" } },
             "summary": { "type": "string" }
         }
-    })
+    });
+    if !fields.is_empty() {
+        if let Some(r) = schema["required"].as_array_mut() {
+            r.push(json!("custom"));
+        }
+        schema["properties"]["custom"] = agents::custom_schema(fields);
+    }
+    schema
 }
 
 /// Saves everything the call produced and kicks off extraction.
@@ -96,6 +107,11 @@ pub async fn finalize(state: &AppState, slot: &CallSlot, outcome: CallOutcome) {
             retranscribe(&state, id, clips).await;
             if let Err(e) = extract(&state, id).await {
                 tracing::warn!(call = %id, error = %e, "lead extraction failed");
+            }
+            if state.config.llm.review_calls {
+                if let Err(e) = super::training::review(&state, DEFAULT_TENANT, id, None).await {
+                    tracing::warn!(call = %id, error = %e, "call review failed");
+                }
             }
         });
     }
@@ -236,11 +252,20 @@ async fn persist(state: &AppState, slot: &CallSlot, o: &CallOutcome) -> Result<(
         );
     }
 
+    // The estimated part of `llm` (streams cut short), shown for
+    // transparency; it is already included in `llm`.
+    let llm_estimated: f64 = o
+        .llm_estimated
+        .iter()
+        .filter_map(|(model, usage)| pricing.llm_cost(model, *usage))
+        .sum();
+
     let cost = stt_cost + tts_cost + llm_cost;
     let breakdown = serde_json::json!({
         "stt": stt_cost,
         "tts": tts_cost,
         "llm": llm_cost,
+        "llm_estimated": llm_estimated,
         "tts_cached_chars": o.tts_cached_chars,
     });
 
@@ -293,7 +318,9 @@ async fn persist(state: &AppState, slot: &CallSlot, o: &CallOutcome) -> Result<(
            detected_language = COALESCE($3, detected_language), \
            stt_seconds = $4, tts_chars = $5, llm_usage = $6, \
            cost_inr = $7 + COALESCE((cost_breakdown->>'extraction')::float8, 0) \
-             + COALESCE((cost_breakdown->>'stt_retranscribe')::float8, 0), \
+             + COALESCE((cost_breakdown->>'stt_retranscribe')::float8, 0) \
+             + COALESCE((cost_breakdown->>'tts_greeting')::float8, 0) \
+             + COALESCE((cost_breakdown->>'review')::float8, 0), \
            cost_breakdown = cost_breakdown || $8 \
          WHERE id = $1",
     )
@@ -330,7 +357,7 @@ async fn persist(state: &AppState, slot: &CallSlot, o: &CallOutcome) -> Result<(
     Ok(())
 }
 
-fn record_cost(service: &'static str, model: &str, inr: f64) {
+pub(crate) fn record_cost(service: &'static str, model: &str, inr: f64) {
     metrics::counter!(metric_names::COST_PAISE_TOTAL, "service" => service, "model" => model.to_owned())
         .increment((inr * 100.0).round().max(0.0) as u64);
 }
@@ -343,6 +370,14 @@ pub async fn extract(state: &AppState, call: CallId) -> Result<(), AppError> {
     .bind(call.0)
     .fetch_all(&state.db)
     .await?;
+    let fields: Vec<LeadField> = sqlx::query_as::<_, (sqlx::types::Json<Vec<LeadField>>,)>(
+        "SELECT collect_fields FROM calls WHERE id = $1",
+    )
+    .bind(call.0)
+    .fetch_optional(&state.db)
+    .await?
+    .map(|(f,)| f.0)
+    .unwrap_or_default();
     let followups: Vec<(String,)> =
         sqlx::query_as("SELECT topic FROM call_followups WHERE call_id = $1 ORDER BY created_at")
             .bind(call.0)
@@ -365,14 +400,20 @@ pub async fn extract(state: &AppState, call: CallId) -> Result<(), AppError> {
             user.push_str(&format!("- {t}\n"));
         }
     }
-    let system = format!(
-        "You extract structured lead data from a sales phone call transcript. Today is {}. \
+    let mut system = format!(
+        "You extract structured lead data from a sales phone call transcript. Today is {} (India time); \
+         turn relative dates such as \"tomorrow\" or \"next Saturday\" into YYYY-MM-DD. \
          Return only a JSON object with keys name (in English letters as normally written, never spelled out letter by letter), \
          interest_level (high|medium|low|none), budget, \
          preferred_language (BCP-47 such as en-IN, hi-IN, ta-IN: the language the caller spoke or asked for), follow_up_date (YYYY-MM-DD when a date is agreed), objections (array of strings) \
          and summary (2-3 sentences, English). Use null when unknown. Do not invent facts.",
-        chrono::Utc::now().format("%Y-%m-%d")
+        chrono::Utc::now()
+            .with_timezone(&chrono_tz::Asia::Kolkata)
+            .format("%A %Y-%m-%d")
     );
+    if !fields.is_empty() {
+        system.push_str(&agents::custom_instructions(&fields));
+    }
     let endpoint = LlmEndpoint {
         url: state.config.llm.primary_url(),
         model: state.config.llm.extract_model.clone(),
@@ -387,7 +428,7 @@ pub async fn extract(state: &AppState, call: CallId) -> Result<(), AppError> {
         max_tokens: 600,
         temperature: 0.0,
         disable_reasoning: true,
-        json_schema: Some(("lead_fields".to_owned(), extraction_schema())),
+        json_schema: Some(("lead_fields".to_owned(), extraction_schema(&fields))),
     };
 
     let mut last_error = String::new();
@@ -407,14 +448,18 @@ pub async fn extract(state: &AppState, call: CallId) -> Result<(), AppError> {
                     add_cost(state, call, "extraction", c).await?;
                 }
                 match parse_fields(&completion.content) {
-                    Ok(mut fields) => {
-                        fields.name = fields
+                    Ok(mut lead) => {
+                        lead.name = lead
                             .name
                             .map(|n| clean_spoken_name(&n))
                             .filter(|n| !n.is_empty());
+                        lead.custom = (!fields.is_empty()).then(|| {
+                            let raw = lead.custom.take().map(Value::Object);
+                            agents::clean_custom(&fields, raw.as_ref())
+                        });
                         sqlx::query("UPDATE calls SET extracted_fields = $2 WHERE id = $1")
                             .bind(call.0)
-                            .bind(serde_json::to_value(&fields).unwrap_or(Value::Null))
+                            .bind(serde_json::to_value(&lead).unwrap_or(Value::Null))
                             .execute(&state.db)
                             .await?;
                         tracing::info!(%call, "lead fields extracted");
@@ -431,7 +476,7 @@ pub async fn extract(state: &AppState, call: CallId) -> Result<(), AppError> {
 
 /// Adds a post-call cost (`extraction`, `stt_retranscribe`) to the call's AI
 /// cost and to that part of its breakdown.
-async fn add_cost(
+pub(crate) async fn add_cost(
     state: &AppState,
     call: CallId,
     part: &'static str,
@@ -658,7 +703,13 @@ mod tests {
 
     #[test]
     fn schema_lists_every_field() {
-        let s = extraction_schema();
+        let s = extraction_schema(&[]);
         assert_eq!(s["required"].as_array().map(Vec::len), Some(7));
+        assert!(s["properties"].get("custom").is_none());
+        let city: LeadField =
+            serde_json::from_value(json!({"key": "city", "label": "City"})).unwrap();
+        let s = extraction_schema(&[city]);
+        assert_eq!(s["required"].as_array().map(Vec::len), Some(8));
+        assert_eq!(s["properties"]["custom"]["required"], json!(["city"]));
     }
 }

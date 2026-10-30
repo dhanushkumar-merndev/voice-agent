@@ -14,6 +14,7 @@
 pub mod error;
 pub mod fake;
 pub mod llm;
+pub mod metered;
 pub mod openai;
 pub mod sarvam;
 pub mod stt;

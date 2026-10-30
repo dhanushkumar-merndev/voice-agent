@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use common::{
-    assets::Voice,
+    assets::{Pricing, Voice},
     ids::{TenantId, DEFAULT_TENANT},
     storage::Storage,
     AppError, ErrorCode,
@@ -22,7 +22,10 @@ use pipeline::LineAudio;
 use providers::tts::{self, TtsProvider};
 use sqlx::PgPool;
 
-use super::util::sha256_hex;
+use super::{
+    spend::{self, SpendKind},
+    util::sha256_hex,
+};
 
 /// In-memory cap for cached audio.
 const MEMORY_BYTES: u64 = 64 * 1024 * 1024;
@@ -34,6 +37,7 @@ pub struct LineCache {
     db: PgPool,
     storage: Storage,
     tts: Arc<dyn TtsProvider>,
+    pricing: Pricing,
 }
 
 impl std::fmt::Debug for LineCache {
@@ -57,7 +61,7 @@ pub fn key(voice: &Voice, text: &str) -> String {
 
 impl LineCache {
     /// Creates the cache.
-    pub fn new(db: PgPool, storage: Storage, tts: Arc<dyn TtsProvider>) -> Self {
+    pub fn new(db: PgPool, storage: Storage, tts: Arc<dyn TtsProvider>, pricing: Pricing) -> Self {
         Self {
             memory: Cache::builder()
                 .weigher(|_k: &String, v: &Bytes| u32::try_from(v.len()).unwrap_or(u32::MAX))
@@ -66,19 +70,50 @@ impl LineCache {
             db,
             storage,
             tts,
+            pricing,
         }
     }
 
-    /// Returns cached audio, synthesizing and storing it on a miss.
+    /// Whether the audio is already in memory (everything stored is loaded
+    /// into memory by [`Self::preload`] at startup).
+    pub fn has(&self, voice: &Voice, text: &str) -> bool {
+        self.memory.contains_key(&key(voice, text))
+    }
+
+    /// Returns cached audio, synthesizing and storing it on a miss. The TTS
+    /// cost of a miss goes to the shared spend ledger.
     pub async fn get_or_synthesize(
         &self,
         tenant: TenantId,
         voice: &Voice,
         text: &str,
     ) -> Result<Bytes, AppError> {
+        let (audio, cost) = self.get_or_synthesize_billed(tenant, voice, text).await?;
+        if cost > 0.0 {
+            spend::record(
+                &self.db,
+                tenant,
+                SpendKind::TtsCache,
+                &voice.model,
+                text.chars().count() as u64,
+                cost,
+            )
+            .await;
+        }
+        Ok(audio)
+    }
+
+    /// Like [`Self::get_or_synthesize`], but returns the TTS cost (₹, 0 on
+    /// a cache hit) for the caller to bill, e.g. to the call it is for.
+    pub async fn get_or_synthesize_billed(
+        &self,
+        tenant: TenantId,
+        voice: &Voice,
+        text: &str,
+    ) -> Result<(Bytes, f64), AppError> {
         let hash = key(voice, text);
         if let Some(audio) = self.memory.get(&hash) {
-            return Ok(audio);
+            return Ok((audio, 0.0));
         }
         let row: Option<(String,)> =
             sqlx::query_as("SELECT storage_key FROM tts_cache WHERE tenant_id = $1 AND hash = $2")
@@ -91,7 +126,7 @@ impl LineCache {
                 Ok(data) => {
                     let audio = Bytes::from(data);
                     self.memory.insert(hash, audio.clone());
-                    return Ok(audio);
+                    return Ok((audio, 0.0));
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, %storage_key, "cached audio missing; resynthesizing")
@@ -102,9 +137,14 @@ impl LineCache {
         let audio = tts::synthesize(&*self.tts, voice, text, SYNTH_TIMEOUT)
             .await
             .map_err(|e| AppError::new(ErrorCode::ProviderError, format!("tts failed: {e}")))?;
+        // Billed even if storing fails below: the synthesis happened.
+        let cost = self
+            .pricing
+            .tts_cost(&voice.model, text.chars().count() as u64)
+            .unwrap_or(0.0);
         persist(&self.db, &self.storage, tenant, &hash, voice, text, &audio).await?;
         self.memory.insert(hash, audio.clone());
-        Ok(audio)
+        Ok((audio, cost))
     }
 
     /// Loads cached audio from the database into memory, so phrases learned
@@ -137,14 +177,18 @@ impl LineCache {
         tracing::info!(loaded, "cached phrase audio loaded");
     }
 
-    /// Loads or synthesizes several lines concurrently; failures are logged.
+    /// Loads or synthesizes several lines, two at a time so a call's own
+    /// speech never queues behind a burst of TTS requests (Sarvam rate
+    /// limits bursts); failures are logged.
     pub async fn warm(&self, tenant: TenantId, voice: &Voice, texts: Vec<String>) {
-        let jobs = texts
-            .iter()
-            .map(|t| self.get_or_synthesize(tenant, voice, t));
-        for (text, result) in texts.iter().zip(futures_util::future::join_all(jobs).await) {
-            if let Err(e) = result {
-                tracing::warn!(error = %e, %text, "could not warm fixed line");
+        for pair in texts.chunks(2) {
+            let jobs = pair
+                .iter()
+                .map(|t| self.get_or_synthesize(tenant, voice, t));
+            for (text, result) in pair.iter().zip(futures_util::future::join_all(jobs).await) {
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, %text, "could not warm fixed line");
+                }
             }
         }
     }

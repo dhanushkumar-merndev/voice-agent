@@ -3,7 +3,7 @@
 use axum::{
     extract::{DefaultBodyLimit, Request},
     middleware::{from_fn, from_fn_with_state},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use common::AppError;
@@ -17,7 +17,7 @@ use tower_http::{
 use crate::{
     error::ApiError,
     middleware::{require_api_key, track_http},
-    routes::{calls, health, kb, plivo},
+    routes::{agents, calls, health, kb, plivo, stats},
     state::AppState,
 };
 
@@ -29,11 +29,45 @@ use crate::{
 pub fn build_router(state: AppState) -> Router {
     let mut api = Router::new()
         .route("/v1/ping", get(ping))
-        .route("/v1/calls", post(calls::create_call))
+        .route("/v1/calls", post(calls::create_call).get(calls::list_calls))
         .route("/v1/calls/{id}", get(calls::get_call))
         .route("/v1/calls/{id}/hangup", post(calls::hangup_call))
+        .route("/v1/calls/{id}/feedback", post(calls::call_feedback))
+        .route("/v1/calls/{id}/review", post(calls::review_call))
         .route("/v1/costs", get(calls::cost_summary))
-        .route("/v1/knowledge-bases", post(kb::create_kb))
+        .route("/v1/stats", get(stats::stats))
+        .route(
+            "/v1/agents",
+            get(agents::list_agents).post(agents::create_agent),
+        )
+        .route(
+            "/v1/agents/{id}",
+            get(agents::get_agent)
+                .put(agents::update_agent)
+                .delete(agents::delete_agent),
+        )
+        .route("/v1/agents/prompt-edit", post(agents::edit_prompt))
+        .route(
+            "/v1/agents/{id}/training",
+            get(agents::get_training).put(agents::put_training),
+        )
+        .route("/v1/agents/{id}/train.md", get(agents::download_training))
+        .route("/v1/agents/{id}/lessons", get(agents::list_lessons))
+        .route(
+            "/v1/agents/{id}/lessons/{lesson}/apply",
+            post(agents::apply_lesson),
+        )
+        .route(
+            "/v1/agents/{id}/lessons/{lesson}/reject",
+            post(agents::reject_lesson),
+        )
+        .route("/v1/options", get(stats::options))
+        .route("/v1/knowledge-bases", post(kb::create_kb).get(kb::list_kbs))
+        .route("/v1/knowledge-bases/{id}", delete(kb::delete_kb))
+        .route(
+            "/v1/knowledge-bases/{id}/documents/{doc}",
+            get(kb::get_document).delete(kb::delete_document),
+        )
         .route(
             "/v1/knowledge-bases/{id}/documents",
             post(kb::upload_document)

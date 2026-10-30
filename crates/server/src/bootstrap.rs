@@ -85,9 +85,12 @@ pub fn pipeline_settings(config: &Config) -> PipelineSettings {
         vad_silence: Duration::from_millis(u64::from(p.vad_silence_ms)),
         vad_threshold: p.vad_threshold,
         barge_in_min: Duration::from_millis(u64::from(p.barge_in_min_ms)),
+        barge_in_threshold: p.barge_in_vad_threshold,
+        barge_in_talk: Duration::from_millis(u64::from(p.barge_in_talk_ms)),
         eager_llm: p.eager_llm,
         silence_reprompt: Duration::from_secs(u64::from(p.silence_reprompt_secs)),
         ack_wait: Duration::from_millis(u64::from(p.ack_wait_ms)),
+        late_reply: Duration::from_millis(u64::from(p.late_reply_ms)),
         max_spoken_chars_per_turn: p.max_spoken_chars_per_turn as usize,
         max_sentences_per_turn: p.max_sentences_per_turn as usize,
         max_tts_chars_per_call: p.max_tts_chars_per_call as usize,
@@ -173,6 +176,7 @@ pub async fn build_state(
         db.clone(),
         storage.clone(),
         providers.tts.clone(),
+        assets.pricing.clone(),
     ));
     let per_minute = NonZeroU32::new(config.limits.calls_per_minute).unwrap_or(NonZeroU32::MIN);
     let pipeline = Arc::new(pipeline_settings(&config));
@@ -216,6 +220,7 @@ pub fn spawn_housekeeping(state: &AppState) {
             if removed > 0 {
                 tracing::info!(removed, "swept stale call slots");
             }
+            close_abandoned_calls(&s).await;
         }
     });
     if state.plivo.is_some() {
@@ -224,7 +229,14 @@ pub fn spawn_housekeeping(state: &AppState) {
     }
     {
         let s = state.clone();
-        tokio::spawn(async move { s.lines.preload(common::ids::DEFAULT_TENANT).await });
+        let warm = s.providers.configured && s.config.provider_mode == ProviderMode::Sarvam;
+        tokio::spawn(async move {
+            s.lines.preload(common::ids::DEFAULT_TENANT).await;
+            // After preload, so audio stored on earlier runs is not redone.
+            if warm {
+                crate::services::calls::warm_all_voices(&s).await;
+            }
+        });
     }
     if state.providers.configured && state.config.provider_mode == ProviderMode::Sarvam {
         let s = state.clone();
@@ -240,6 +252,26 @@ pub fn spawn_housekeeping(state: &AppState) {
 
 /// Fetches the Plivo charge and recording for recent answered calls that
 /// have none, e.g. because the server restarted before Plivo published them.
+/// Marks calls still "live" in the database long after any call could last
+/// (the cap is one hour) as failed: their server stopped mid-call. Safe with
+/// several servers on one database, since no live call is that old.
+async fn close_abandoned_calls(state: &AppState) {
+    let result = sqlx::query(
+        "UPDATE calls SET status = 'failed', end_reason = COALESCE(end_reason, 'abandoned'), \
+           ended_at = COALESCE(ended_at, now()) \
+         WHERE status IN ('queued', 'ringing', 'in_progress') AND created_at < now() - interval '2 hours'",
+    )
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            tracing::info!(closed = done.rows_affected(), "closed abandoned calls");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not close abandoned calls"),
+    }
+}
+
 async fn backfill_telephony_costs(state: AppState) {
     let rows: Result<Vec<(uuid::Uuid, String)>, _> = sqlx::query_as(
         "SELECT id, plivo_call_uuid FROM calls WHERE telephony_cost_inr IS NULL \
