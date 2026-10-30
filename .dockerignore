@@ -5,3 +5,6 @@ target/
 models/
 .git/
 sim-out/
+recordings/
+test/
+samples/

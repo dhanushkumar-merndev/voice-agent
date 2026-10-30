@@ -49,10 +49,22 @@ pub fn http_client() -> reqwest::Client {
 }
 
 fn providers(config: &Config, http: &reqwest::Client) -> Providers {
+    let ms = Duration::from_millis;
+    let f = config.fake;
     let fake = || Providers {
-        stt: Arc::new(FakeStt::default()),
-        tts: Arc::new(FakeTts::default()),
-        llm: Arc::new(FakeLlm::default()),
+        stt: Arc::new(FakeStt {
+            final_delay: ms(f.stt_final_ms),
+            ..FakeStt::default()
+        }),
+        tts: Arc::new(FakeTts {
+            first_byte_delay: ms(f.tts_first_byte_ms),
+            audio_per_char: ms(f.tts_ms_per_char),
+            ..FakeTts::default()
+        }),
+        llm: Arc::new(FakeLlm {
+            first_token_delay: ms(f.llm_first_token_ms),
+            ..FakeLlm::default()
+        }),
         configured: config.provider_mode == ProviderMode::Fake,
     };
     match (config.provider_mode, &config.sarvam.api_key) {

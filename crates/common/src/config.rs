@@ -169,6 +169,8 @@ pub struct Config {
     pub limits: LimitsConfig,
     /// Locations of on-disk assets.
     pub paths: PathsConfig,
+    /// Delays of the fake providers (`PROVIDER_MODE=fake`).
+    pub fake: FakeConfig,
 }
 
 /// PostgreSQL settings.
@@ -371,6 +373,21 @@ pub struct PathsConfig {
     pub embed_threads: usize,
 }
 
+/// How slowly the fake providers answer, so a load test with
+/// `PROVIDER_MODE=fake` holds each call open as long as the real services
+/// would. All zero by default (tests want fast fakes).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FakeConfig {
+    /// `FAKE_STT_FINAL_MS`: end of speech to final transcript.
+    pub stt_final_ms: u64,
+    /// `FAKE_LLM_FIRST_TOKEN_MS`: request to first token.
+    pub llm_first_token_ms: u64,
+    /// `FAKE_TTS_FIRST_BYTE_MS`: text to first audio.
+    pub tts_first_byte_ms: u64,
+    /// `FAKE_TTS_MS_PER_CHAR`: audio length per character (0 = 5 ms; real speech is about 60).
+    pub tts_ms_per_char: u64,
+}
+
 /// All configuration problems found while loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError(pub Vec<String>);
@@ -494,6 +511,12 @@ impl Config {
                 models_dir: PathBuf::from(env.string_or("MODELS_DIR", "models")),
                 vad_threads: env.parse_or("VAD_THREADS", default_threads(4)),
                 embed_threads: env.parse_or("EMBED_THREADS", default_threads(2)),
+            },
+            fake: FakeConfig {
+                stt_final_ms: env.parse_or("FAKE_STT_FINAL_MS", 0),
+                llm_first_token_ms: env.parse_or("FAKE_LLM_FIRST_TOKEN_MS", 0),
+                tts_first_byte_ms: env.parse_or("FAKE_TTS_FIRST_BYTE_MS", 0),
+                tts_ms_per_char: env.parse_or("FAKE_TTS_MS_PER_CHAR", 0),
             },
         };
 

@@ -12,6 +12,10 @@ name = "voice-sim"
 path = "src/main.rs"
 
 [[bin]]
+name = "voice-load"
+path = "src/bin/load.rs"
+
+[[bin]]
 name = "llm-bench"
 path = "src/bin/llm_bench.rs"
 

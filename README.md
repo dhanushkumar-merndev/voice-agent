@@ -143,6 +143,24 @@ What's covered:
 - **Pipeline (fake providers):** a normal turn with latency marks and STT gating, barge-in, silence re-prompt then hangup, LLM timeout → fallback → "one moment" → retry, TTS budget closing, the `send_details` tool, max duration, and eager mode.
 - **HTTP (smoke test):** migrations, HNSW search, auth, validation, idempotency and rejection of unsigned webhooks.
 
+### Capacity (stress) test, free
+
+How many calls at once a server size handles, with no Sarvam or Plivo cost:
+
+```sh
+scripts/stress.sh                                  # 2 CPU / 4 GB, 1 → 300 calls at once
+SIZES="1:2g 2:4g 4:8g" scripts/stress.sh            # compare server sizes
+STEPS="1 10 50" REBUILD=1 scripts/stress.sh         # rebuild the image after code changes
+```
+
+It runs the real `voice-server` image in Docker with CPU/RAM limits (`docker-compose.stress.yml`), fake Sarvam
+(`PROVIDER_MODE=fake` with realistic delays, `FAKE_*_MS`) and fake Plivo (`voice-load`: real-time 20 ms media,
+3 caller turns per call). Before any call it checks that the containers have no Sarvam/Plivo keys and cannot
+reach the internet, and stops otherwise. Its own Postgres and MinIO are deleted afterwards. Each step is judged
+against the 1-call run (reply time, audio stutter, RAM); results land in `stress-results/<time>/summary.md`.
+Not covered: Sarvam's own concurrency limits for your plan, and TLS/network cost to real Sarvam (a little more
+CPU than the fakes), so leave ~30 % headroom.
+
 ## Deploy to the VPS (India region)
 
 1. Copy the repo and a production `.env`:

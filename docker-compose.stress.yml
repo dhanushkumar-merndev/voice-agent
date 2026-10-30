@@ -1,0 +1,91 @@
+# Free capacity test: the real voice-server in a CPU/RAM-limited container,
+# with fake Sarvam (PROVIDER_MODE=fake) and fake Plivo (voice-load).
+# Run it with scripts/stress.sh, which checks it is offline first.
+#
+# Nothing here can cost money:
+#   - no Sarvam or Plivo keys are passed in (and .env is not read),
+#   - every container sits on an `internal` network with no internet route,
+#   - its own Postgres and MinIO, thrown away afterwards (your real data is untouched).
+name: voice-stress
+
+networks:
+  offline:
+    internal: true
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg16
+    environment:
+      POSTGRES_USER: voice
+      POSTGRES_PASSWORD: voice
+      POSTGRES_DB: voice
+    networks: [offline]
+    cpus: ${STRESS_DB_CPUS:-1}
+    mem_limit: ${STRESS_DB_MEM:-1g}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voice -d voice"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+      MINIO_SITE_REGION: ap-south-1
+    networks: [offline]
+    cpus: ${STRESS_DB_CPUS:-1}
+    mem_limit: ${STRESS_DB_MEM:-1g}
+
+  voice-server:
+    image: voice-stress:latest
+    environment:
+      APP_ENV: local
+      PROVIDER_MODE: fake
+      API_KEY: stress-test-key
+      LOG_FORMAT: json
+      RUST_LOG: info,ort=warn
+      BIND_ADDR: 0.0.0.0:8080
+      PUBLIC_BASE_URL: http://voice-server:8080
+      DATABASE_URL: postgres://voice:voice@postgres:5432/voice
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: recordings
+      S3_ACCESS_KEY: minio
+      S3_SECRET_KEY: minio123
+      S3_REGION: ap-south-1
+      S3_FORCE_PATH_STYLE: "true"
+      CALLS_RATE_LIMIT_PER_MIN: "100000"
+      # Roughly what Sarvam takes, so calls stay open as long as real ones.
+      FAKE_STT_FINAL_MS: ${FAKE_STT_FINAL_MS:-300}
+      FAKE_LLM_FIRST_TOKEN_MS: ${FAKE_LLM_FIRST_TOKEN_MS:-450}
+      FAKE_TTS_FIRST_BYTE_MS: ${FAKE_TTS_FIRST_BYTE_MS:-250}
+      FAKE_TTS_MS_PER_CHAR: ${FAKE_TTS_MS_PER_CHAR:-60}
+    volumes:
+      - ./models:/app/models:ro
+    networks: [offline]
+    # The server size being tested.
+    cpus: ${STRESS_CPUS:-2}
+    mem_limit: ${STRESS_MEM:-4g}
+    memswap_limit: ${STRESS_MEM:-4g}
+    ulimits:
+      nofile: 65536
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  # Fake Plivo: `docker compose run --rm load --calls 20 ...` (scripts/stress.sh).
+  load:
+    image: voice-stress:latest
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/voice-load"]
+    environment:
+      API_KEY: stress-test-key
+    volumes:
+      - ./samples/tones:/samples:ro
+    networks: [offline]
+    ulimits:
+      nofile: 65536
