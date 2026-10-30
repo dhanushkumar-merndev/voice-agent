@@ -1,0 +1,20 @@
+/target/
+.env
+.env.*
+!.env.example
+
+# Downloaded by scripts/download_models.sh
+/models/*
+!/models/.gitkeep
+
+# voice-sim output
+/sim-out/
+/recordings/
+
+# Voice samples (scripts/tts_samples.py)
+/test/output/
+
+/test/
+# Generated voice samples
+/samples/
+stress-results/
