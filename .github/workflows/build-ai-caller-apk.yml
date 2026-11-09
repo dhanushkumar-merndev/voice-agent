@@ -34,7 +34,7 @@ jobs:
 
       - name: Generate Android project files
         run: |
-          flutter create --project-name ai_caller --org in.stargrowthhub --platforms android .
+          flutter create --project-name ai_caller --org com.stargrowthhub --platforms android .
           rm -f test/widget_test.dart
 
       - name: Patch Android manifest (internet, app name, links)
